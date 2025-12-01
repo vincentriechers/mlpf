@@ -56,10 +56,11 @@ fi
 
 
 
-ddsim --compactFile $K4GEO/FCCee/CLD/compact/$CLDGEO/$CLDGEO.xml --outputFile out_sim_edm4hep.root --steeringFile ${PATHCLDCONFIG}/cld_steer.py --inputFiles events.hepmc --numberOfEvents ${NEV} --random.seed ${SEED}
-
 # copy large input files via xrootd (recommended)
 xrdcp -r ${PATHCLDCONFIG}/* .
+
+ddsim --compactFile $K4GEO/FCCee/CLD/compact/$CLDGEO/$CLDGEO.xml --outputFile out_sim_edm4hep.root --steeringFile ${PATHCLDCONFIG}/cld_steer.py --inputFiles events.hepmc --numberOfEvents ${NEV} --random.seed ${SEED}
+
 
 # running both gen tracking and CT tracking
 k4run CLDReconstruction.py -n ${NEV}  --inputFiles out_sim_edm4hep.root --outputBasename out_reco_edm4hep_GT --truthTracking

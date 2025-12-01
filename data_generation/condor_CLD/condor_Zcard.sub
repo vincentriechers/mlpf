@@ -1,0 +1,12 @@
+# here goes your shell script
+executable    = run_sequence_CLD_train.sh
+
+# here you specify where to put .log, .out and .err files
+output                = std/condor.$(ClusterId).$(ProcId).out
+error                 = std/condor.$(ClusterId).$(ProcId).err
+log                   = std/condor.$(ClusterId).log
+
++AccountingGroup = "group_u_CMST3.all"
++JobFlavour    = "workday"
+arguments="/eos/home-v/vriecher/mlpf/data_generation/condor_CLD/../../ p8_ee_tt_ecm365 2 2 /eos/user/v/vriecher/mlpf_events_new/CLD_o2_v05 /tmp/vriecher/condor_logs Zcard CLD_o2_v05 /eos/user/v/vriecher/CLDConfig/CLDConfig"
+queue
