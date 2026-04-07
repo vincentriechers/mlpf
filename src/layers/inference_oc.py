@@ -187,8 +187,9 @@ def remove_bad_tracks_from_cluster_v1(g, labels_hdb):
 
             bad_diffs = diffs>sigma_3
 
-            mean_pos_cluster = torch.mean(g.ndata["pos_hits_xyz"][mask_labels_i*mask_hit_type_t1], dim=0)
+            # mean_pos_cluster = torch.mean(g.ndata["pos_hits_xyz"][mask_labels_i*mask_hit_type_t1], dim=0)
             bad_tracks = bad_diffs*(number_of_hits_muon<1)
+            #bad_tracks = bad_diffs
 
             cluster_t2_nodes = torch.nonzero(mask_labels_i & mask_hit_type_t2).view(-1)
             bad_tracks_nodes = cluster_t2_nodes[bad_tracks]
@@ -321,6 +322,9 @@ def create_and_store_graph_output(
             labels_hdb = _fix_labels_for_classes(
                 labels_hdb, dic["graph"], dic["part_true"], fix_clusters_class, model_output.device
             )
+            if not truth_tracks:
+                labels_hdb, labels_clusters_removed_tracks = remove_bad_tracks_from_cluster_v1(dic["graph"], labels_hdb)
+                _, labels_hdb = torch.unique(labels_hdb, return_inverse=True)
         if predict and pandora_available:
             labels_pandora = get_labels_pandora(tracks, dic, model_output.device)
             num_clusters_pandora = len(labels_pandora.unique())

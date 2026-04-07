@@ -80,29 +80,36 @@ def log_losses_wandb(
         val_ = " val"
     else:
         val_ = ""
-    if logwandb and ((num_batches - 1) % 10) == 0 and local_rank == 0:
-        wandb.log(
-            {
-                "loss" + val_ + " regression": loss,
-                "loss" + val_ + " lv": losses[0],
-                "loss" + val_ + " beta": losses[1],
-                "loss" + val_ + " beta sig": losses[2],
-                "loss" + val_ + " beta noise": losses[3],
-                # "loss" + val_ + " PID": losses[4],
-                # "loss" + val_ + " momentum": losses[5],
-                # "loss" + val_ + " mass (not us. for opt.)": losses[6],
-                # "inter-clustering loss" + val_ + "": losses[10],
-                # "filling loss" + val_ + "": losses[11],
-                "loss" + val_ + " attractive": losses[12],
-                "loss" + val_ + " repulsive": losses[13],
-                "loss" + val_ + " repulsive 2": losses[18],
-                "loss" + val_ + " track": losses[19],
-                #"loss" + val_ + " beta zeros": losses[15],
+    if len(losses)>0:
+        if logwandb and ((num_batches - 1) % 10) == 0 and local_rank == 0:
+            wandb.log(
+                {
+                    "loss" + val_ + " regression": loss,
+                    "loss" + val_ + " lv": losses[0],
+                    "loss" + val_ + " beta": losses[1],
+                    "loss" + val_ + " beta sig": losses[2],
+                    "loss" + val_ + " beta noise": losses[3],
+                    # "loss" + val_ + " PID": losses[4],
+                    # "loss" + val_ + " momentum": losses[5],
+                    # "loss" + val_ + " mass (not us. for opt.)": losses[6],
+                    # "inter-clustering loss" + val_ + "": losses[10],
+                    # "filling loss" + val_ + "": losses[11],
+                    "loss" + val_ + " attractive": losses[12],
+                    "loss" + val_ + " repulsive": losses[13],
+                    "loss" + val_ + " repulsive 2": losses[18],
+                    "loss" + val_ + " track": losses[19],
+                    #"loss" + val_ + " beta zeros": losses[15],
 
-                "loss energy correction charged": loss_ll,
-                "loss energy correction": loss_ec,
-            }
-        )
+                    "loss energy correction charged": loss_ll,
+                    "loss energy correction": loss_ec,
+                }
+            )
+    else:
+        if logwandb and ((num_batches - 1) % 10) == 0 and local_rank == 0:
+            wandb.log(
+                {
+                    "loss" + val_ + " regression": loss})
+
 
 
 def log_losses_wandb_tracking(

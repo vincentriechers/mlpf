@@ -110,6 +110,9 @@ def obtain_clustering_for_matched_showers(
             labels = _fix_labels_for_classes(
                 labels, dic["graph"], dic["part_true"], fix_clusters_class, model_output.device
             )
+            if not truth_tracks:
+                labels, _ = remove_bad_tracks_from_cluster_v1(dic["graph"], labels)
+                _, labels = torch.unique(labels, return_inverse=True)
         particle_ids = torch.unique(dic["graph"].ndata["particle_number"])
         shower_p_unique = torch.unique(labels)
         shower_p_unique, row_ind, col_ind, i_m_w, _ = match_showers(
