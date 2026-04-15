@@ -196,11 +196,24 @@ def plot_mass(sd_hgb, sd_pandora, PATH_store_summary_plots):
     ax[1].grid()
 
 
+    def rms90(values):
+        """RMS of the central 90% of the distribution."""
+        arr = np.asarray(values, dtype=float)
+        arr = arr[np.isfinite(arr)]
+        p5, p95 = np.percentile(arr, 5), np.percentile(arr, 95)
+        core = arr[(arr >= p5) & (arr <= p95)]
+        return np.sqrt(np.mean((core - np.mean(core))**2))
+
     var_m_model_1 = round(std_model*100, 1)
     var_m_pandora_1 = round(std_pandora*100, 1)
 
     var_m_model = round((dic["mass_model_var16"]/(2*dic["mass_model_mean16"])*100), 1)
     var_m_pandora = round((dic["mass_model_var16p"]/(2*dic["mass_model_mean16p"])*100), 1)
+
+    rms90_mass_model   = round(rms90(event_res_dic[label_ML]["mass_over_true_model"]) * 100, 1)
+    rms90_mass_pandora = round(rms90(event_res_dic[label_ML]["mass_over_true_pandora"]) * 100, 1)
+    rms90_E_model      = round(rms90(event_res_dic[label_ML]["energy_over_true"]) * 100, 1)
+    rms90_E_pandora    = round(rms90(event_res_dic[label_ML]["energy_over_true_pandora"]) * 100, 1)
 
     # sigma_e_over_true_pandora = round(event_res_dic[label_ML]["var_energy_over_true_pandora"]/event_res_dic[label_ML]["mean_energy_over_true_pandora"], 3)
     # sigma_e_over_true = round(event_res_dic[label_ML]["var_energy_over_true"]/event_res_dic[label_ML]["mean_energy_over_true"], 3)
@@ -236,15 +249,15 @@ def plot_mass(sd_hgb, sd_pandora, PATH_store_summary_plots):
     # ax[1].legend(loc='upper left')
 
     # from matplotlib.lines import Line2D
-    custom_line1 = Line2D([0], [0], color="#E36414",label="HitPF "+"\n"+"$\sigma/\mu$={}$\%$".format(var_m_model_1))
+    custom_line1 = Line2D([0], [0], color="#E36414",label="HitPF "+"\n"+"$\sigma/\mu$={}$\%$".format(var_m_model_1)+"\n"+"RMS90={}$\%$".format(rms90_E_model))
     # custom_line_gt = Line2D([0], [0], color="green",label="ML GT "+"\n"+"$\sigma/\mu$={}".format(round((event_res_dic["ML GTC"]["var_mass_model"]), 2),
     #     ))
 
-    custom_line_pandora = Line2D([0], [0], color="#0F4C5C",label="Pandora "+"\n"+"$\sigma/\mu$={}$\%$".format(var_m_pandora_1),)
+    custom_line_pandora = Line2D([0], [0], color="#0F4C5C",label="Pandora "+"\n"+"$\sigma/\mu$={}$\%$".format(var_m_pandora_1)+"\n"+"RMS90={}$\%$".format(rms90_E_pandora),)
 
-    custom_line2 = Line2D([0], [0], color="#E36414",label="HitPF "+"\n"+"$\sigma/\mu$={}$\%$".format(var_m_model), )
+    custom_line2 = Line2D([0], [0], color="#E36414",label="HitPF "+"\n"+"$\sigma/\mu$={}$\%$".format(var_m_model)+"\n"+"RMS90={}$\%$".format(rms90_mass_model), )
 
-    custom_line_pandora2 = Line2D([0], [0], color="#0F4C5C",label="Pandora "+"\n"+"$\sigma/\mu$={}$\%$".format(var_m_pandora), )
+    custom_line_pandora2 = Line2D([0], [0], color="#0F4C5C",label="Pandora "+"\n"+"$\sigma/\mu$={}$\%$".format(var_m_pandora)+"\n"+"RMS90={}$\%$".format(rms90_mass_pandora), )
 
 
     title= r"$Z\rightarrow q\bar q (q=u,d,s), \quad \sqrt{s}=91$ GeV"

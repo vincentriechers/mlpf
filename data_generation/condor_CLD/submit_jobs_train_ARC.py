@@ -67,6 +67,12 @@ def main():
         default="False",
         action="store_true",
     )
+    parser.add_argument(
+        "--dataset",
+        help="generating also ARC data ",
+        default="False",
+        action="store_true",
+    )
 
     parser.add_argument("--njobs", help="max number of jobs", default=2)
 
@@ -98,6 +104,7 @@ def main():
     cldgeo = args.cldgeo
     cldconfig = args.cldconfig
     gentracking = args.gentracking
+    dataset = args.dataset
     arc = args.arc 
     njobs = int(args.njobs)
     nev = args.nev
@@ -161,6 +168,8 @@ log                   = std/condor.$(ClusterId).log
 
                 if arc:
                     args.append("--arc")
+                if dataset:
+                    args.append("--dataset")
 
                 argts = " ".join(args)
 
