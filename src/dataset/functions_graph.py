@@ -8,6 +8,16 @@ import time
 from src.dataset.functions_particles import concatenate_Particles_GT, Particles_GT
 from src.dataset.utils_hits import create_noise_label
 from src.dataset.dataclasses import Hits
+from src.dataset.uot_matching import uot_track_hit_labels
+
+try:
+    import sys as _sys
+    _sys.path.insert(0, "/afs/cern.ch/work/m/mgarciam/private/DiffusionGeometry")
+    import diffusion_geometry as _dg_lib
+    _DIFFUSION_GEOMETRY_AVAILABLE = True
+except ImportError:
+    _DIFFUSION_GEOMETRY_AVAILABLE = False
+
 
 def create_inputs_from_table(
     output, prediction=False, args=None
@@ -78,6 +88,141 @@ def compute_tangents(pos, weights=None, k=10):
     return tangents
 
 
+def _build_diffusion_geometry(pos, k_neighbors, n_basis):
+    """Build a DiffusionGeometry object from xyz positions (numpy)."""
+    return _dg_lib.DiffusionGeometry.from_point_cloud(
+        pos,
+        n_function_basis=n_basis,
+        knn_kernel=k_neighbors,
+    )
+
+
+def compute_tangents_diffusion(pos, weights=None, k=20, n_basis=12):
+    """Estimate tangent directions using diffusion geometry.
+
+    Uses the gradient of the Fiedler vector (first non-trivial Laplacian
+    eigenfunction), which captures the principal direction of variation of
+    the point cloud manifold.  More robust than PCA for curved / overlapping
+    showers.  Falls back to ``compute_tangents`` when the library is not
+    installed or the point cloud is too small.
+
+    Args:
+        pos     (Tensor): [N, 3] node positions.
+        weights (Tensor): unused (kept for API compatibility with compute_tangents).
+        k       (int):   number of neighbours for the diffusion kernel.
+        n_basis (int):   number of Laplacian eigenfunctions to compute.
+
+    Returns:
+        Tensor: [N, 3] tangent vectors directed outward from the origin.
+    """
+    N = pos.shape[0]
+    print("_DIFFUSION_GEOMETRY_AVAILABLE", _DIFFUSION_GEOMETRY_AVAILABLE)
+    if not _DIFFUSION_GEOMETRY_AVAILABLE or N < k + 2:
+        return compute_tangents(pos, weights, k=min(k, max(N - 1, 1)))
+
+    pos_np = pos.detach().cpu().float().numpy()
+    k_actual = min(k, N - 1)
+    n_basis_actual = min(n_basis, N - 1)
+
+    try:
+        print("computing diff")
+        dg = _build_diffusion_geometry(pos_np, k_actual, n_basis_actual)
+        # Fiedler vector: first non-trivial eigenfunction (index 1)
+        phi1 = dg.triple.function_basis[:, 1]          # (N,)
+        f = dg.function(phi1)
+        grad_np = f.grad().to_ambient()                # (N, 3)
+        tangents = torch.tensor(grad_np, dtype=pos.dtype, device=pos.device)
+        norm = torch.norm(tangents, dim=1, keepdim=True).clamp(min=1e-8)
+        tangents = tangents / norm
+    except Exception:
+        print("in exception")
+        return compute_tangents(pos, weights, k=k_actual)
+
+    # Orient outward
+    radial = pos / (torch.norm(pos, dim=1, keepdim=True) + 1e-8)
+    flip = (tangents * radial).sum(dim=1) < 0
+    tangents[flip] *= -1
+
+    return tangents
+
+
+def compute_diffusion_features(pos, k=20, n_basis=12, n_coords=4):
+    """Compute diffusion-geometry-based per-hit features for shower separation.
+
+    Returns a dict with the following tensors, all shaped [N, *]:
+
+    ``diffusion_coords``  [N, n_coords]
+        First ``n_coords`` non-trivial Laplacian eigenvectors.  Hits from the
+        same shower cluster together in this space; nearby but distinct showers
+        are well separated.
+
+    ``metric_anisotropy`` [N, 3]
+        Linearity, planarity and sphericity computed from the eigenvalues
+        (λ₁ ≥ λ₂ ≥ λ₃) of the pointwise metric tensor Γ(x,x):
+          linearity  = (λ₁ − λ₂) / (λ₁ + ε)  — high inside a linear shower
+          planarity  = (λ₂ − λ₃) / (λ₁ + ε)  — high at the plane of overlap
+          sphericity = λ₃         / (λ₁ + ε)  — high at isotropic / boundary regions
+
+    ``fiedler_gradient`` [N, 3]
+        Gradient of the Fiedler vector in ambient 3D space.  Its direction
+        separates the two dominant clusters of hits; its magnitude is largest
+        near the boundary between two nearby showers.
+
+    Args:
+        pos     (Tensor): [N, 3] node positions.
+        k       (int):   number of neighbours for the diffusion kernel.
+        n_basis (int):   number of Laplacian eigenfunctions to compute.
+        n_coords (int):  how many diffusion coordinates to return (≤ n_basis−1).
+
+    Returns:
+        dict[str, Tensor] or None if DiffusionGeometry is not available / N too small.
+    """
+    N = pos.shape[0]
+    if not _DIFFUSION_GEOMETRY_AVAILABLE or N < k + 2:
+        return None
+
+    pos_np = pos.detach().cpu().float().numpy()
+    k_actual = min(k, N - 1)
+    n_basis_actual = min(n_basis, N - 1)
+    n_coords = min(n_coords, n_basis_actual - 1)
+
+    try:
+        dg = _build_diffusion_geometry(pos_np, k_actual, n_basis_actual)
+        
+        # --- 1. Diffusion coordinates: eigenvectors 1..n_coords ---------------
+        # Skip index 0 (constant eigenfunction, eigenvalue ≈ 0)
+        diff_coords_np = dg.triple.function_basis[:, 1: 1 + n_coords]   # (N, n_coords)
+        diffusion_coords = torch.tensor(diff_coords_np.copy(), dtype=pos.dtype, device=pos.device)
+
+        # --- 2. Metric anisotropy from Γ(x, x) --------------------------------
+        gamma = dg.cache.gamma_coords                    # (N, 3, 3)
+        gamma_t = torch.tensor(gamma, dtype=pos.dtype, device=pos.device)
+        eigvals = torch.linalg.eigvalsh(gamma_t)        # (N, 3), ascending
+        lam1 = eigvals[:, 2]                            # largest
+        lam2 = eigvals[:, 1]
+        lam3 = eigvals[:, 0]                            # smallest
+        eps = 1e-8
+        linearity  = (lam1 - lam2) / (lam1 + eps)
+        planarity  = (lam2 - lam3) / (lam1 + eps)
+        sphericity =  lam3         / (lam1 + eps)
+        metric_anisotropy = torch.stack([linearity, planarity, sphericity], dim=1)  # (N, 3)
+
+        # --- 3. Fiedler vector gradient in ambient 3D -------------------------
+        phi1 = dg.triple.function_basis[:, 1]
+        f = dg.function(phi1)
+        fiedler_grad_np = f.grad().to_ambient()          # (N, 3)
+        fiedler_gradient = torch.tensor(fiedler_grad_np, dtype=pos.dtype, device=pos.device)
+        print("computed fiedler_gradient")
+    except Exception:
+        return None
+
+    return {
+        "diffusion_coords":   diffusion_coords,    # [N, n_coords]
+        "metric_anisotropy":  metric_anisotropy,   # [N, 3]
+        "fiedler_gradient":   fiedler_gradient,    # [N, 3]
+    }
+
+
 def create_graph(
     output,
     for_training =True, args=None
@@ -105,7 +250,13 @@ def create_graph(
             ).float()  
         g.ndata["p_hits"] = hits.p_hits.float() 
         g.ndata["pos_hits_xyz"] = hits.pos_xyz_hits.float()
-        # g.ndata["tangents"] = compute_tangents(hits.pos_xyz_hits.float(), weights=hits.e_hits.float().view(-1))
+        if getattr(args, "diffusion_features", False):
+            g.ndata["tangents"] = compute_tangents_diffusion(hits.pos_xyz_hits.float())
+            # _diff = compute_diffusion_features(hits.pos_xyz_hits.float())
+            # if _diff is not None:
+            #     g.ndata["diffusion_coords"]  = _diff["diffusion_coords"].float()   # [N, 4]
+            #     g.ndata["metric_anisotropy"] = _diff["metric_anisotropy"].float()  # [N, 3]
+            #     g.ndata["fiedler_gradient"]  = _diff["fiedler_gradient"].float()   # [N, 3]
         g.ndata["pos_pxpypz_at_vertex"] = hits.pos_pxpypz.float()
         g.ndata["pos_pxpypz"] = hits.pos_pxpypz  #TrackState::AtIP
         g.ndata["pos_pxpypz_at_calo"] = hits.pos_pxpypz_calo  #TrackState::AtCalorimeter
@@ -136,11 +287,25 @@ def create_graph(
         # y_data_graph.calculate_corrected_E(g, hits.connection_list)
         graph_empty = False
         if torch.unique(hits.hit_particle_link).shape[0]==1 and torch.unique(hits.hit_particle_link)[0]==-1:
-            graph_empty = True 
+            graph_empty = True
         if hits.pos_xyz_hits.shape[0] < 10:
             graph_empty = True
+
+        if getattr(args, "uot_labels", False):
+            uot_lbl = uot_track_hit_labels(g)
+            g.ndata["uot_labels"] = uot_lbl
+
+            # For each node store the calo entry point of its assigned track.
+            # Neutral / unassigned nodes get (0, 0, 0).
+            # Track ref_xyz is already in pos_hits_xyz for track nodes.
+            track_mask = g.ndata["p_hits"].squeeze(1) > 0          # [N] bool
+            track_ref_xyz = g.ndata["pos_hits_xyz"][track_mask]    # [N_trk, 3]
+            uot_ref = torch.zeros(g.num_nodes(), 3)
+            charged = uot_lbl > 0
+            uot_ref[charged] = track_ref_xyz[uot_lbl[charged] - 1]
+            g.ndata["uot_ref_xyz"] = uot_ref
     
-    if ( not args.truth_tracking)and (not  args.ILD) and (not args.predict):
+    if ( not args.truth_tracking) and (not args.predict):
         g = make_bad_tracks_noise_tracks(g, y_data_graph)
     if args.truth_tracking and (not args.predict):
         g = remove_hits_outside_cone(g,y_data_graph, args.allegro)
@@ -293,78 +458,30 @@ def make_bad_tracks_noise_tracks(g, y ):
    
         angles = torch.sum(mean_pos_cluster_ecal*pos_track,dim=1)/(torch.norm(mean_pos_cluster_ecal, dim=1)*torch.norm(pos_track, dim=1))
         angles[torch.isnan(angles)]=0
-        
-        # if  torch.sum(g.ndata["particle_number"] == 0)==0:
-        #     #then index 1 is at 0 
-        #     mean_pos_cluster = mean_pos_cluster[1:,:]
-        #     particle_track = particle_track-1
-        # if mean_pos_cluster.shape[0]> torch.max(particle_track):
-        #     distance_track_cluster = torch.norm(mean_pos_cluster[particle_track.long()]-pos_track,dim=1)/1000
-
+    
         distance_track_cluster = torch.norm(mean_pos_cluster_all-pos_track,dim=1)/1000
         pid = y.pid[particle_track.long()-1]
         pid[particle_track.long()==0]=0
         pid = torch.abs(pid)
-        bad_tracks = ((distance_track_cluster>0.24)+(angles<0.9998))*(pid.view(-1)!=13)
-        bad_tracks = bad_tracks+((distance_track_cluster>0.5)+(angles<0.99))*(pid.view(-1)==13)+(diffs>0.75)
+        bad_tracks = ((distance_track_cluster>0.25))*(pid.view(-1)!=13)*(angles<0.9)
+        bad_tracks = bad_tracks+((distance_track_cluster>0.5))*(pid.view(-1)==13)*(angles<0.9)
         index_bad_tracks = mask_hit_type_t2.nonzero().view(-1)[bad_tracks]
         
-        g.ndata["particle_number"][index_bad_tracks]= 0 
-    return g
-
-
-def make_double_tracks(g, y):
-    mask_hit_type_t2 = g.ndata["hit_type"] == 1
-    pos_track = g.ndata["pos_hits_xyz"][mask_hit_type_t2]
-    p_tracks = g.ndata["p_hits"][mask_hit_type_t2]
-    particle_track = g.ndata["particle_number"][mask_hit_type_t2]
-    
-    # Process each particle track
-    if len(particle_track) > 0:
-        for index, i in enumerate(particle_track):
-            if i == 0:
-                mean_pos_cluster_all.append(torch.zeros((1, 3)).view(-1, 3))
-                E_cluster.append(torch.zeros((1)).view(-1))
-            else:
-                mask_labels_i = g.ndata["particle_number"] == i
-                mean_pos_cluster = torch.mean(g.ndata["pos_hits_xyz"][mask_labels_i * (g.ndata["hit_type"] == 2)], dim=0)
-                mean_pos_cluster_all.append(mean_pos_cluster.view(-1, 3))
-
-                # Sum the energy for this particle's tracks
-                E_cluster.append(torch.sum(g.ndata["e_hits"][mask_labels_i]).view(-1))
-
-        # Combine lists into tensors
-        mean_pos_cluster_all = torch.cat(mean_pos_cluster_all, dim=0)
-        E_cluster = torch.cat(E_cluster, dim=0)
-
-        # Calculate the energy difference between the particle's momentum and the cluster energy
-        diffs = torch.abs(E_cluster - p_tracks.view(-1)) / p_tracks.view(-1)
-
-        # Calculate the angles between the track position and the cluster position
-        angles = torch.sum(mean_pos_cluster_all * pos_track, dim=1) / (torch.norm(mean_pos_cluster_all, dim=1) * torch.norm(pos_track, dim=1))
-        angles[torch.isnan(angles)] = 0
-
-        # Calculate the distance between the track and cluster
-        distance_track_cluster = torch.norm(mean_pos_cluster_all - pos_track, dim=1) / 1000
-
-        # Identify "bad" tracks based on distance, angle, and energy difference
-        bad_tracks = (distance_track_cluster > 0.24) + (angles < 0.9998)
-        bad_tracks = bad_tracks + ((distance_track_cluster > 0.5) + (angles < 0.99)) + (diffs > 0.75)
-
-        # Find indices of bad tracks
-        index_bad_tracks = mask_hit_type_t2.nonzero().view(-1)[bad_tracks]
 
         # Remove tracks with the highest energy difference if there are multiple tracks for the same particle
-        for i in range(len(particle_track)):
-            track_indices = (particle_track == particle_track[i]).nonzero().view(-1)
+        for id in torch.unique(particle_track):
+            track_indices = (particle_track == id).nonzero().view(-1)
             if len(track_indices) > 1:
                 # Calculate energy differences for multiple tracks of the same particle
                 track_diffs = diffs[track_indices]
                 max_diff_index = track_diffs.argmax()  # Get the index of the track with the max energy diff
                 # Mark the track with the max diff as bad
-                index_bad_tracks = torch.cat((index_bad_tracks, track_indices[max_diff_index].view(1)))
+                index_bad_tracks_double = mask_hit_type_t2.nonzero().view(-1)[track_indices[max_diff_index].view(1)]
+                
+                index_bad_tracks = torch.cat((index_bad_tracks, index_bad_tracks_double))
 
         # Set the particle_number of the bad tracks to 0
-        g.ndata["particle_number"][index_bad_tracks] = 0
-    
+        g.ndata["particle_number"][index_bad_tracks]=0
     return g
+
+

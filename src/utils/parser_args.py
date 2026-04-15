@@ -498,6 +498,13 @@ parser.add_argument(
 )
 
 parser.add_argument(
+    "--uot_labels",
+    action="store_true",
+    default=False,
+    help="Run UOT track-hit matching and add uot_labels / uot_ref_xyz to graph ndata",
+)
+
+parser.add_argument(
     "--freeze_core",
     action="store_true",
     default=False,
@@ -732,4 +739,17 @@ parser.add_argument(
     default=False,
     action="store_true",
     help="using pandora information",
+)
+parser.add_argument(
+    "--resume-ckpt",
+    type=str,
+    default=None,
+    help="Path to a Lightning checkpoint (.ckpt) to resume training from, restoring weights, optimizer state, and LR scheduler.",
+)
+
+parser.add_argument(
+    "--diffusion-features",
+    default=False,
+    action="store_true",
+    help="Compute diffusion-geometry features per hit (diffusion_coords, metric_anisotropy, fiedler_gradient) and store in graph node data.",
 )
