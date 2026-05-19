@@ -5,7 +5,10 @@ import sys
 import glob
 import torch
 import lightning as L
+
+# torch.set_float32_matmul_precision("medium")
 from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.strategies import DDPStrategy
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "../"))
 
@@ -42,10 +45,15 @@ def setup_wandb(args):
 
 def build_trainer(args, gpus, logger, training=True):
     callbacks = get_callbacks(args) if training else get_callbacks_eval(args)
-
-    strategy = "auto" if args.correction else "ddp" if training else None
-
+    if args.correction and training:
+        strategy = DDPStrategy(find_unused_parameters=True)
+    elif training:
+        strategy = DDPStrategy(static_graph=True)
+    else:
+        strategy = "auto"
+    #DDPStrategy(find_unused_parameters=True) #
     return L.Trainer(
+        gradient_clip_val=1.0, gradient_clip_algorithm="norm",
         callbacks=callbacks,
         accelerator="gpu",
         devices=gpus,
@@ -55,6 +63,7 @@ def build_trainer(args, gpus, logger, training=True):
         strategy=strategy,
         limit_train_batches=args.train_batches if training else None,
         limit_val_batches=5 if training else None,
+        precision="bf16-mixed" if training else "32",
     )
 
 
@@ -64,10 +73,10 @@ def build_trainer(args, gpus, logger, training=True):
 
 def main():
     args = parser.parse_args()
-    torch.autograd.set_detect_anomaly(True)
+    # torch.autograd.set_detect_anomaly(True)  # debug only — very slow in production
 
     training_mode = not args.predict
-    args.local_rank = 0
+    args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
     args.is_muons = True
 
     # --------------------------------------------------
@@ -76,7 +85,10 @@ def main():
     args = get_samples_steps_per_epoch(args)
 
     if training_mode:
-        args.data_train = glob.glob(args.data_train[0] + "*.parquet")
+        files = []
+        for folder in args.data_train:
+            files.extend(glob.glob(folder + "*.parquet"))
+        args.data_train = files
         train_loader, val_loader, data_config, train_input_names = train_load(args)
     else:
         test_loaders, data_config = test_load(args)
@@ -106,6 +118,7 @@ def main():
             model=model,
             train_dataloaders=train_loader,
             val_dataloaders=val_loader,
+            ckpt_path=args.resume_ckpt,
         )
 
     # --------------------------------------------------
