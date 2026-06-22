@@ -704,7 +704,7 @@ def get_genparticles_and_adjacencies( prop_data, hit_data, pandora_data, calohit
         # event has only one particle (then index will be empty because no daughters)
         gen_features_rec = awkward.Record({feat: (gen_features[feat][mask_visible] if feat != "index" else None) for feat in gen_features.keys()})
     else:
-        gen_features_rec = awkward.Record({feat: gen_features[feat][mask_visible] for feat in gen_features.keys()})
+        gen_features_rec = awkward.Record({feat: (gen_features[feat][mask_visible] if feat != "index" else None) for feat in gen_features.keys()})
     # if len(np.array(mask_visible_true)) == 1:
     #     # event has only one particle (then index will be empty because no daughters)
     #     gen_features_true = awkward.Record({feat: (gen_features[feat][mask_visible_true] if feat != "index" else None) for feat in gen_features.keys()})
