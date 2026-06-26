@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+#### EXAMPLE:
+# bash run_sequence_CLD_train_ARC.sh --homedir /afs/cern.ch/work/m/mgarciam/private/mlpf/ --guncard ecor.gun --nev 10 --seed 30 --outputdir /eos/experiment/fcc/users/m/mgarciam/mlpf/CLD/train/testbug/ --dir /eos/experiment/fcc/users/m/mgarciam/mlpf/condor/testbug/ --sample gun --cldgeo CLD_o2_v05 --pathcldconfig /afs/cern.ch/work/m/mgarciam/private/CLD_Config_versions/CLDConfig_ARC/CLDConfig/
 ########################################
 # Defaults
 ########################################
@@ -23,8 +25,8 @@ while [[ $# -gt 0 ]]; do
         --sample)         SAMPLE="$2"; shift 2 ;;
         --cldgeo)         CLDGEO="$2"; shift 2 ;;
         --pathcldconfig)  PATHCLDCONFIG="$2"; shift 2 ;;
-        --gentracking)    GENTRACKING=true; shift ;;
-        --arc)            ARC=true; shift ;;
+        --gentracking)    GENTRACKING=false; shift ;;
+        --arc)            ARC=false; shift ;;
         --dataset)        DATASET=true; shift ;;
         *) echo "Unknown option $1"; exit 1 ;;
     esac
@@ -55,7 +57,7 @@ cd "${DIR}/${SEED}"
 # Load Key4HEP
 ########################################
 
-source /cvmfs/sw-nightlies.hsf.org/key4hep/setup.sh
+source /cvmfs/sw.hsf.org/key4hep/setup.sh -r 2026-04-08 
 
 ########################################
 # Event generation
@@ -82,10 +84,14 @@ if [[ "$SAMPLE" == "Zcard" ]]; then
         --Pythia8.PythiaInterface.pythiacard card.cmd
     cp out.hepmc events.hepmc
 fi
+mkdir -p "${OUTPUTDIR}/pythia"
+python /afs/cern.ch/work/f/fccsw/public/FCCutils/eoscopy.py \
+   events.hepmc \
+   "${OUTPUTDIR}/pythia/${SEED}.hepmc"
 
-########################################
-# Simulation
-########################################
+# ########################################
+# # Simulation
+# ########################################
 
 xrdcp -r "${PATHCLDCONFIG}"/* .
 
@@ -136,7 +142,7 @@ fi
 # Switch environment for preprocessing
 ########################################
 
-source /cvmfs/sft.cern.ch/lcg/views/LCG_108/x86_64-el9-gcc15-opt/setup.sh
+# source /cvmfs/sft.cern.ch/lcg/views/LCG_108/x86_64-el9-gcc15-opt/setup.sh
 
 ########################################
 # Dataset creation (dynamic flags)
@@ -166,16 +172,16 @@ fi
 # Copy outputs
 ########################################
 
-mkdir -p "${OUTPUTDIR}/05"
-#mkdir -p "${OUTPUTDIR}/root_files"
+mkdir -p "${OUTPUTDIR}/parquet"
+# mkdir -p "${OUTPUTDIR}/root"
 
 python /afs/cern.ch/work/f/fccsw/public/FCCutils/eoscopy.py \
     out_reco_edm4hep_REC.parquet \
-    "${OUTPUTDIR}/05/pf_tree_${SEED}.parquet"
+    "${OUTPUTDIR}/parquet/pf_tree_${SEED}.parquet"
 
-#python /afs/cern.ch/work/f/fccsw/public/FCCutils/eoscopy.py \
+# python /afs/cern.ch/work/f/fccsw/public/FCCutils/eoscopy.py \
 #    out_reco_edm4hep_REC.edm4hep.root \
-#    "${OUTPUTDIR}/root_files/pf_tree_${SEED}.edm4hep.root"
+#    "${OUTPUTDIR}/root/pf_tree_${SEED}.edm4hep.root"
 
 
 
@@ -209,3 +215,4 @@ fi
 ########################################
 
 rm -rf "${DIR}/${SEED}" 
+
