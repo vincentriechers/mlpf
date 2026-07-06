@@ -116,15 +116,23 @@ def to_filelist(args, mode="train"):
     if args.local_rank is not None:
         if mode == "train":
             gpus_list, _ = set_gpus(args)
-            local_world_size = len(gpus_list)  # int(os.environ['LOCAL_WORLD_SIZE'])
+            # GLOBAL world size across ALL nodes so every rank gets a DISJOINT shard.
+            # `args.local_rank` already holds the GLOBAL rank (SLURM_PROCID / RANK).
+            # SLURM_NTASKS (srun multi-node) or WORLD_SIZE (torchrun) give the global
+            # size; fall back to the per-node GPU count for the single-node launcher.
+            world_size = (
+                int(os.environ.get("SLURM_NTASKS", os.environ.get("WORLD_SIZE", 0)))
+                or len(gpus_list)
+            )
             new_file_dict = {}
             for name, files in file_dict.items():
-                new_files = files[args.local_rank :: local_world_size]
+                new_files = files[args.local_rank :: world_size]
                 assert len(new_files) > 0
                 np.random.shuffle(new_files)
                 new_file_dict[name] = new_files
             file_dict = new_file_dict
-            print(args.local_rank, len(file_dict["_"]))
+            print("[shard] global_rank", args.local_rank, "world_size", world_size,
+                  "files", len(file_dict["_"]))
 
     if args.copy_inputs:
         import tempfile
@@ -250,7 +258,7 @@ def train_load(args):
         pin_memory=True,
         num_workers=min(args.num_workers, int(len(train_files) * args.file_fraction)),
         collate_fn=collator_func,
-        persistent_workers=False,
+        persistent_workers=args.num_workers > 0,
         prefetch_factor=prefetch_factor
     )
     val_loader = DataLoader(

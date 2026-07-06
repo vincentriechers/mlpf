@@ -290,6 +290,15 @@ def create_graph(
             graph_empty = True
         if hits.pos_xyz_hits.shape[0] < 10:
             graph_empty = True
+        # Drop degenerate low-multiplicity events: with <min_objects truth objects the OC
+        # repulsive / per-object-normalisation terms have nothing to divide by -> NaN.
+        # Objects are labels >=0; noise = -1. Gated by --min-objects (default 0 = off).
+        min_obj = getattr(args, "min_objects", 0)
+        if min_obj > 0:
+            uniq_links = torch.unique(hits.hit_particle_link)
+            n_obj = int((uniq_links >= 0).sum())
+            if n_obj < min_obj:
+                graph_empty = True
 
         if getattr(args, "uot_labels", False):
             uot_lbl = uot_track_hit_labels(g)

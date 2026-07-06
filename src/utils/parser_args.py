@@ -279,6 +279,12 @@ parser.add_argument(
     help='device for the testing; to use CPU, set to empty string (""); to use multiple gpu, set it as a comma separated list, e.g., `1,2,3,4`; if not set, use the same as `--gpus`',
 )
 parser.add_argument(
+    "--num-nodes",
+    type=int,
+    default=1,
+    help="Number of nodes for multi-node DDP training. `--gpus` lists the GPUs PER NODE; the global world size is num_nodes * (#gpus per node).",
+)
+parser.add_argument(
     "--num-workers",
     type=int,
     default=1,
@@ -368,7 +374,7 @@ parser.add_argument(
 parser.add_argument(
     "--clustering_and_energy_loss", "-clust_en", action="store_true", default=False
 )
-parser.add_argument("--clustering_space_dim", "-clust_dim", type=int, default=2)
+parser.add_argument("--clustering_space_dim", "-clust_dim", type=int, default=3)
 parser.add_argument(
     "--n-noise",
     "-n-noise",
@@ -476,6 +482,28 @@ parser.add_argument(
     help="use the hgcal loss",
 )
 parser.add_argument(
+    "--allpair_repulsion_weight",
+    type=float,
+    default=1.0,
+    help="Weight for the all-pair (point-to-point) inter-shower repulsive loss term; "
+    "only active with --losstype baseline_allpair_rep. Likely needs tuning relative to "
+    "the baseline repulsion (start small, e.g. 0.01-0.1, and watch 'loss allpair_rep').",
+)
+parser.add_argument(
+    "--allpair_repulsion_margin",
+    type=float,
+    default=1.0,
+    help="Margin (in cluster-space units) of the all-pair repulsive hinge relu(margin - d). "
+    "Matches the baseline repulsion margin of 1.0 by default.",
+)
+parser.add_argument(
+    "--allpair_repulsion_knn",
+    type=int,
+    default=64,
+    help="Number of nearest neighbours per hit used to build the within-event repulsion "
+    "graph for --losstype baseline_allpair_rep.",
+)
+parser.add_argument(
     "--loss-regularization",
     action="store_true",
     default=False,
@@ -502,6 +530,25 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="Run UOT track-hit matching and add uot_labels / uot_ref_xyz to graph ndata",
+)
+
+parser.add_argument(
+    "--clip-calo-momentum",
+    action="store_true",
+    default=False,
+    help="Isotropically clip |pos_pxpypz_at_calo| to a physical cap (60 GeV) before "
+    "embed_translation in the cld_direction model, removing unphysical ~100-240 GeV "
+    "ILD track-reco glitches that dominate the input multivector. Requires (re)training.",
+)
+
+parser.add_argument(
+    "--unit-calo-direction",
+    action="store_true",
+    default=False,
+    help="Unit-normalize pos_pxpypz_at_calo to a pure track DIRECTION before "
+    "embed_translation in the cld_direction model (magnitude already carried by the e/p/log "
+    "scalars). Zeros stay zero (calo hits / failed track fits). Takes precedence over "
+    "--clip-calo-momentum. Removes all scale/outlier issues; equivariant. Requires (re)training.",
 )
 
 parser.add_argument(
@@ -739,6 +786,18 @@ parser.add_argument(
     default=False,
     action="store_true",
     help="using pandora information",
+)
+parser.add_argument(
+    "--gradient-clip-val",
+    type=float,
+    default=0.0,
+    help="If >0, clip gradients to this max norm via the Lightning Trainer (gradient_clip_val). 0 = disabled (default, unchanged behaviour). Tames NaN divergence from the E(3) learned clustering head.",
+)
+parser.add_argument(
+    "--min-objects",
+    type=int,
+    default=0,
+    help="If >0, skip events with fewer than this many truth objects (treated as empty graphs in create_graph). 0 = disabled (default). Removes degenerate single-object events that can make the OC loss NaN.",
 )
 parser.add_argument(
     "--resume-ckpt",

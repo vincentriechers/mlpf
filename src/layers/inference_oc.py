@@ -18,8 +18,24 @@ import random
 import string
 import hdbscan
 import time
-import densitypeakclustering as dc
+try:
+    import densitypeakclustering as dc  # optional: only used by density-peak inference clustering
+except ModuleNotFoundError:
+    dc = None
 from src.utils.pid_conversion import pid_conversion_dict as _PID_CONV_DICT
+from src.layers.dpc_track_seeded import DPC_track_seeded
+
+def compact_labels_preserve_zero(labels):
+    """Renumber positive cluster labels to be contiguous starting from 1, keeping label 0
+    reserved for noise. Unlike ``torch.unique(..., return_inverse=True)`` this never pulls a
+    real cluster down into label 0 when no explicit noise label is present (e.g. clean
+    dimuon / diphoton events) — which would otherwise reassign that whole cluster to noise and
+    drop it during shower matching."""
+    out = labels.clone()
+    pos = torch.unique(labels[labels > 0])
+    for new_id, old_id in enumerate(pos.tolist(), start=1):
+        out[labels == old_id] = new_id
+    return out
 
 
 def _fix_labels_for_classes(labels_hdb, graph, part_true, class_ids_to_fix, device):
@@ -64,10 +80,9 @@ def _fix_labels_for_classes(labels_hdb, graph, part_true, class_ids_to_fix, devi
         offset = int(labels_hdb.max().item()) + 1
         labels_out[target_mask] = particle_numbers[target_mask] + offset
 
-    # Remap to contiguous 0..N so scatter operations stay compact.
-    # torch.unique returns sorted unique values; since 0 (noise) is the smallest
-    # it maps to index 0, preserving the noise convention.
-    _, labels_out = torch.unique(labels_out, return_inverse=True)
+    # Remap positive cluster labels to contiguous 1..N so scatter operations stay compact,
+    # while keeping label 0 reserved for noise even when no noise hit is present.
+    labels_out = compact_labels_preserve_zero(labels_out)
 
     return labels_out
 def local_density_energy(D, d_c,energies,  normalize=False):
@@ -105,12 +120,14 @@ def local_density_energy(D, d_c,energies,  normalize=False):
     # Calculate and return the local density vector
     return rho
 
-def DPC_custom_CLD(X, g, device):
+
+
+def DPC_custom_CLD_240(X, g, device, use_nms_centers=False):
     tic =  time.time()
     d_c = 0.1
     rho_min = 0.05
     delta_min = 0.4
-    D = dc.distance_matrix(X.detach().cpu())
+    D = dc.distance_matrix(X.float().detach().cpu())
     rho = local_density_energy(D,d_c,g.ndata["e_hits"].view(-1).cpu().numpy()) #dc.local_density
     delta,nearest = dc.distance_to_larger_density(D, rho)
     centers = dc.cluster_centers(rho, delta, rho_min=rho_min, delta_min=delta_min)
@@ -119,7 +136,31 @@ def DPC_custom_CLD(X, g, device):
     core_ids = np.full(len(X), -1)   # default noise / non-core label
     D[np.isnan(D)]=0
     for indx, c in enumerate(centers):
-        # points that were assigned to center c AND are closer than d_c
+        idx = np.where((ids == indx) & (D[:, c] < 0.5))[0]
+        core_ids[idx] = indx
+    labels = torch.Tensor(core_ids)+1
+    toc = time.time()
+    print("clustering", toc-tic)
+    return labels.long().to(device)
+
+
+def DPC_custom_CLD(X, g, device, use_nms_centers=False):
+    tic =  time.time()
+    d_c = 0.1
+    rho_min = 0.05
+    delta_min = 0.4
+    D = dc.distance_matrix(X.float().detach().cpu())
+    rho = local_density_energy(D,d_c,g.ndata["e_hits"].view(-1).cpu().numpy()) #dc.local_density
+    delta,nearest = dc.distance_to_larger_density(D, rho)
+    if use_nms_centers:
+        centers = _select_centers_nms(rho, delta, nearest, rho_min=rho_min, delta_min=delta_min, rho_dominance_ratio=3.0)
+    else:
+        centers = dc.cluster_centers(rho, delta, rho_min=rho_min, delta_min=delta_min)
+    # Assign cluster ID's to all datapoints
+    ids = dc.assign_cluster_id(rho, nearest, centers)
+    core_ids = np.full(len(X), -1)   # default noise / non-core label
+    D[np.isnan(D)]=0
+    for indx, c in enumerate(centers):
         idx = np.where((ids == indx) & (D[:, c] < 0.5))[0]
         core_ids[idx] = indx
     labels = torch.Tensor(core_ids)+1
@@ -130,8 +171,8 @@ def DPC_custom_CLD(X, g, device):
 def DPC_custom(X, g, device):
     d_c = 0.05
     rho_min = 0.1
-    delta_min = 0.20
-    D = dc.distance_matrix(X.detach().cpu())
+    delta_min = 0.4
+    D = dc.distance_matrix(X.float().detach().cpu())
     rho = local_density_energy(D,d_c,g.ndata["e_hits"].view(-1).cpu().numpy())
     delta,nearest = dc.distance_to_larger_density(D, rho)
     centers = dc.cluster_centers(rho, delta, rho_min=rho_min, delta_min=delta_min)
@@ -141,7 +182,7 @@ def DPC_custom(X, g, device):
     D[np.isnan(D)]=0
     for indx, c in enumerate(centers):
         # points that were assigned to center c AND are closer than d_c
-        idx = np.where((ids == indx) & (D[:, c] < 0.3))[0]
+        idx = np.where((ids == indx) & (D[:, c] < 0.4))[0]
         core_ids[idx] = indx
     labels = torch.Tensor(core_ids)+1
     return labels.long().to(device)
@@ -152,7 +193,7 @@ def DPC(X, device):
     d_c = 0.20
     rho_min = 2
     delta_min = 0.2
-    D = dc.distance_matrix(X.detach().cpu())
+    D = dc.distance_matrix(X.float().detach().cpu())
     rho = dc.local_density(D, d_c)
     delta,nearest = dc.distance_to_larger_density(D, rho)
     centers = dc.cluster_centers(rho, delta, rho_min=rho_min, delta_min=delta_min)
@@ -266,16 +307,17 @@ def create_and_store_graph_output(
     extra_features=None,
     fakes_labels=None,
     pandora_available=False,
-    truth_tracks=False
+    truth_tracks=False,
+    clust_dim=3,
 ):
     number_of_showers_total = 0
     number_of_showers_total1 = 0
     number_of_fake_showers_total1 = 0
-    batch_g.ndata["coords"] = model_output[:, 0:3]
-    batch_g.ndata["beta"] = model_output[:, 3]
+    batch_g.ndata["coords"] = model_output[:, 0:clust_dim]
+    batch_g.ndata["beta"] = model_output[:, clust_dim]
     if not tracking:
         if e_corr is None:
-            batch_g.ndata["correction"] = model_output[:, 4]
+            batch_g.ndata["correction"] = model_output[:, clust_dim + 1]
     graphs = dgl.unbatch(batch_g)
     batch_id = y.batch_number.view(-1)  # y[:, -1].view(-1)
     df_list = []
@@ -298,24 +340,19 @@ def create_and_store_graph_output(
             # labels_clustering = clustering_obtain_labels(
             #     X, dic["graph"].ndata["beta"].view(-1), model_output.device, tbeta=0.2, td=0.05
             # )
+        labels_clusters_removed_tracks = torch.zeros_like(dic["graph"].ndata["particle_number"])
         if use_gt_clusters:
             labels_hdb = dic["graph"].ndata["particle_number"].type(torch.int64)
+        elif "pred_cluster_labels" in dic["graph"].ndata:
+            # reuse labels cached by obtain_clustering_for_matched_showers (already track-removed)
+            labels_hdb = dic["graph"].ndata["pred_cluster_labels"]
         else:
             #labels_hdb = hfdb_obtain_labels(X, model_output.device)
             labels_hdb =DPC_custom_CLD(X, dic["graph"], model_output.device)
-            #labels_hdb = labels_clustering
-            # betas = torch.sigmoid(dic["graph"].ndata["beta"])
-            # labels_clustering = clustering_obtain_labels(
-            #     X, betas.view(-1), model_output.device,  tbeta=0.7, td=0.3
-            # )
-            # labels_hdb = labels_clustering
-
-            # num_clusters = len(labels_hdb.unique())
-            #if labels_hdb.min() == 0 and labels_hdb.sum() == 0:
-            #    labels_hdb += 1  # Quick hack
-            #    raise Exception("!!!! Labels==0 !!!!")
+            #labels_hdb =DPC_track_seeded(X, dic["graph"], model_output.device)
             if not truth_tracks:
                 labels_hdb, labels_clusters_removed_tracks = remove_bad_tracks_from_cluster_v1(dic["graph"], labels_hdb)
+                labels_hdb = compact_labels_preserve_zero(labels_hdb)
 
         # Oracle: replace predicted labels with true particle labels for specified classes
         if fix_clusters_class:
@@ -324,7 +361,7 @@ def create_and_store_graph_output(
             )
             if not truth_tracks:
                 labels_hdb, labels_clusters_removed_tracks = remove_bad_tracks_from_cluster_v1(dic["graph"], labels_hdb)
-                _, labels_hdb = torch.unique(labels_hdb, return_inverse=True)
+                labels_hdb = compact_labels_preserve_zero(labels_hdb)
         if predict and pandora_available:
             labels_pandora = get_labels_pandora(tracks, dic, model_output.device)
             num_clusters_pandora = len(labels_pandora.unique())
@@ -361,22 +398,28 @@ def create_and_store_graph_output(
                 tracks=tracks,
             )
 
-        # path_graphs_all_comparing = os.path.join(path_save, "graphs_all_comparing")
-        # if not os.path.exists(path_graphs_all_comparing):
-        #    os.makedirs(path_graphs_all_comparing)
-        
-        # torch.save(
-        #      dic,
-        #      path_save
-        #       + "/graphs/"
-        #      + str(local_rank)
-        # #      + "_"
-        #      + str(step)
-        #       + "_"
-        #      + str(i)
-        #      + ".pt",
-        #   )
-        
+        # --- debug dump of per-event graph + clustering (gated by env var DUMP_GRAPHS=<N>) ---
+        _dump_max = int(os.environ.get("DUMP_GRAPHS", "0"))
+        if _dump_max > 0:
+            _n_saved = getattr(create_and_store_graph_output, "_n_saved", 0)
+            if _n_saved < _dump_max:
+                # CPU copy for portable serialization (don't mutate the live GPU graph)
+                g_cpu = dic["graph"].to(torch.device("cpu"))
+                # store the predicted clustering so it can be compared against true particle_number
+                g_cpu.ndata["pred_labels_hdb"] = labels_hdb.detach().cpu().long()
+                g_cpu.ndata["labels_removed_tracks"] = labels_clusters_removed_tracks.detach().cpu()
+                # Cast bfloat16 tensors to float32 — old DGL doesn't support bfloat16 serialization
+                for key in list(g_cpu.ndata.keys()):
+                    if g_cpu.ndata[key].dtype == torch.bfloat16:
+                        g_cpu.ndata[key] = g_cpu.ndata[key].float()
+                os.makedirs(path_save + "/graphs_v3", exist_ok=True)
+                torch.save(
+                    {"graph": g_cpu, "part_true": dic["part_true"]},
+                    path_save + "/graphs_v3/" + str(local_rank) + "_" + str(step) + "_" + str(_n_saved) + ".pt",
+                )
+                create_and_store_graph_output._n_saved = _n_saved + 1
+                print("DUMP_GRAPHS: saved event", _n_saved, "->", path_save + "/graphs_v3/")
+
         if len(shower_p_unique_hdb) > 1:
             # df_event, number_of_showers_total = generate_showers_data_frame(
             #     labels_clustering,

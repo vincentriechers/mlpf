@@ -97,7 +97,8 @@ def log_losses_wandb(
                     "loss" + val_ + " attractive": losses[12],
                     "loss" + val_ + " repulsive": losses[13],
                     "loss" + val_ + " repulsive 2": losses[18],
-                    "loss" + val_ + " track": losses[19],
+                    "loss" + val_ + " subcal": losses[19],
+                    "loss" + val_ + " allpair_rep": losses[20] if len(losses) > 20 else 0.0,
                     #"loss" + val_ + " beta zeros": losses[15],
 
                     "loss energy correction charged": loss_ll,
