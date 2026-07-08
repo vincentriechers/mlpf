@@ -770,6 +770,14 @@ parser.add_argument(
     help="using ILD detector",
 )
 parser.add_argument(
+    "--delphi",
+    default=False,
+    action="store_true",
+    help="using DELPHI detector (pf_tree parquets with 14-feature CALO-only X_hit, "
+    "positions in cm). Forces ILD/pandora off and rescales all positions cm->mm at "
+    "load time so shared code (mm constants) works unchanged.",
+)
+parser.add_argument(
     "--train-batches",
     default=100,
     type=int,

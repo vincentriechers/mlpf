@@ -88,6 +88,13 @@ def main():
         os.environ.get("SLURM_PROCID", os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
     )
     args.is_muons = True
+    if args.delphi:
+        # DELPHI pf_trees have a 14-feature CALO-only X_hit (X_hit[:,14] of the ILD
+        # path would crash) and no pandora branches; positions are handled in the
+        # dataset code via the same flag (cm -> mm).
+        args.ILD = False
+        args.pandora = False
+        assert not args.allegro, "--delphi and --allegro are mutually exclusive"
 
     # --------------------------------------------------
     # Data
