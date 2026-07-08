@@ -676,11 +676,13 @@ def get_genparticles_and_adjacencies( prop_data, hit_data, pandora_data, calohit
     # particle has more than 10 MeV enegy in the calo
     gp_in_calo = np.array(gp_to_recoE>0.01) 
     gp_in_tracker = gp_in_calo*0 #np.array(gp_to_track >= 0.1)[:, 0]
-    gp_in_tracker[gp_to_track_index] = 1
-    gp_in_tracker = gp_in_tracker==1
-    gp_interacted_with_detector = gp_in_tracker*gp_in_calo+gp_in_calo
+    if len(genparticle_to_trk[0]) > 0:
+        gp_in_tracker[gp_to_track_index] = 1
+        gp_in_tracker = gp_in_tracker==1
+        gp_interacted_with_detector = gp_in_tracker*gp_in_calo+gp_in_calo
+    else:
+        gp_interacted_with_detector = gp_in_calo
     #store particles that left only track, track+calo, calo and generator status 1 (reconstructable particles)
-    gp_interacted_with_detector_2 = (gp_in_tracker+gp_in_calo)
     # gp_interacted_with_detector_with_daughters = add_daughters_to_status1(gen_features,gp_interacted_with_detector_2 )
     # gp_interacted_with_detector_status1 = gp_interacted_with_detector_with_daughters*((np.abs(gen_features["generatorStatus"])==1)+(np.abs(gen_features["generatorStatus"])==2))
     gp_interacted_with_tracker_no_calo = gp_in_tracker*(~gp_in_calo)
@@ -702,7 +704,7 @@ def get_genparticles_and_adjacencies( prop_data, hit_data, pandora_data, calohit
         # event has only one particle (then index will be empty because no daughters)
         gen_features_rec = awkward.Record({feat: (gen_features[feat][mask_visible] if feat != "index" else None) for feat in gen_features.keys()})
     else:
-        gen_features_rec = awkward.Record({feat: gen_features[feat][mask_visible] for feat in gen_features.keys()})
+        gen_features_rec = awkward.Record({feat: (gen_features[feat][mask_visible] if feat != "index" else None) for feat in gen_features.keys()})
     # if len(np.array(mask_visible_true)) == 1:
     #     # event has only one particle (then index will be empty because no daughters)
     #     gen_features_true = awkward.Record({feat: (gen_features[feat][mask_visible_true] if feat != "index" else None) for feat in gen_features.keys()})

@@ -79,8 +79,8 @@ def main():
 
     args = parser.parse_args()
 
-    outdir = os.path.abspath(args.outdir)
-    condor_dir = os.path.abspath(args.condordir)
+    outdir = args.outdir.rstrip("/")
+    condor_dir = args.condordir.rstrip("/")
     config = args.config
     sample = args.sample
     cldgeo = args.cldgeo
@@ -88,13 +88,13 @@ def main():
     njobs = int(args.njobs)
     nev = args.nev
     queue = args.queue
-    homedir = os.path.abspath(os.getcwd()) + "/../../"
+    homedir = os.path.abspath(os.path.join(os.getcwd(), "../.."))
 
     os.system("mkdir -p {}".format(outdir))
 
     # find list of already produced files:
     list_of_outfiles = []
-    for name in glob.glob("{}/gen_tracking_eval_corrected_mass/*.parquet".format(outdir)):
+    for name in glob.glob("{}/parquet/*.parquet".format(outdir)):
         list_of_outfiles.append(name)
 
     script = "run_sequence_CLD_train.sh"
@@ -119,7 +119,7 @@ log                   = std/condor.$(ClusterId).log
     for job in range(njobs):
         if (job>  0):
             seed = str(job + 1)
-            basename = "gen_tracking/pf_tree_" + seed + "_gentracking.parquet" 
+            basename = "parquet/pf_tree_" + seed + ".parquet" 
             outputFile = outdir + "/" + basename
 
             # print outdir, basename, outputFile
