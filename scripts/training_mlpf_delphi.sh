@@ -5,9 +5,9 @@
 #SBATCH --error=/srv/beegfs/scratch/users/r/riechers/delphi_mlpf/logs/%x-%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=12
 #SBATCH --gres=gpu:1
-#SBATCH --mem=64G
+#SBATCH --mem=32G
 #SBATCH --time=6-00:00:00
 
 # Full DELPHI clustering training: 500k Z->qqbar events (filtered pf_trees).
