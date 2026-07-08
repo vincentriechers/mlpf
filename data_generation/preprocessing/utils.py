@@ -647,7 +647,6 @@ def get_genparticles_and_adjacencies( prop_data, hit_data, pandora_data, calohit
         # print("gp_to_track_index", gp_to_track_index)
     else:
         gp_to_track = np.zeros((n_gp, 1))
-        gp_to_track_index = np.array([], dtype=int)
     # one hit has contribution from different MCs
     gp_to_calohit = coo_matrix((genparticle_to_hit[2], (genparticle_to_hit[0], genparticle_to_hit[1])), shape=(n_gp, n_hit))
     # count hits per MC can't count enegy because there are more links than hits (one hit has contribution from different MCs)
@@ -677,8 +676,7 @@ def get_genparticles_and_adjacencies( prop_data, hit_data, pandora_data, calohit
     # particle has more than 10 MeV enegy in the calo
     gp_in_calo = np.array(gp_to_recoE>0.01) 
     gp_in_tracker = gp_in_calo*0 #np.array(gp_to_track >= 0.1)[:, 0]
-    if len(gp_to_track_index) > 0:
-        gp_in_tracker[gp_to_track_index] = 1
+    gp_in_tracker[gp_to_track_index] = 1
     gp_in_tracker = gp_in_tracker==1
     gp_interacted_with_detector = gp_in_tracker*gp_in_calo+gp_in_calo
     #store particles that left only track, track+calo, calo and generator status 1 (reconstructable particles)

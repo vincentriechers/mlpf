@@ -6,12 +6,11 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=80
 #SBATCH --gres=gpu:1
-#SBATCH --time=24:00:00
+#SBATCH --time=08:00:00
 #SBATCH --qos=acc_ehpc
 #SBATCH --account=ehpc399
 
 set -euo pipefail
-shopt -s nullglob
 
 ml miniforge/24.3.0-0
 CONDA_BASE="$(dirname "$(dirname "$(which conda)")")"
@@ -49,10 +48,12 @@ export BLIS_NUM_THREADS=8
 export NUMEXPR_MAX_THREADS=64
 export NUMEXPR_NUM_THREADS=8
 
+# Adjust DATA_TEST or model directories if you want to evaluate a different sample/checkpoints.
+DATA_TEST="/gpfs/scratch/ehpc399/vincent/data/500k_mix/evaluation/evaluation_eCH/05/pf_tree_2.parquet"
 CFG_DATA="config_files/config_hits_track_v4.yaml"
 CFG_NET="src/models/wrapper/example_mode_gatr_noise.py"
-CLUSTER_MODEL_DIR="/gpfs/scratch/ehpc399/vincent/models/05_clustering_1M_2303"
-PROPS_MODEL_DIR="/gpfs/scratch/ehpc399/vincent/models/05_properties_1M_2403"
+CLUSTER_MODEL_DIR="/gpfs/scratch/ehpc399/vincent/models/500k_05"
+PROPS_MODEL_DIR="/gpfs/scratch/ehpc399/vincent/models/PROPS_500k_05_DoloresLike_20260309_130956"
 OUTPUT_DIR="${PROPS_MODEL_DIR}"
 
 CLUSTER_CKPT="$(ls -1t "${CLUSTER_MODEL_DIR}"/*.ckpt 2>/dev/null | head -n1 || true)"
@@ -73,62 +74,42 @@ echo "Using clustering checkpoint: ${CLUSTER_CKPT}"
 echo "Using properties checkpoint: ${PROPS_CKPT}"
 echo "Writing outputs to: ${OUTPUT_DIR}/showers_df_evaluation/"
 
-declare -A DATASETS=(
-  [eCH]="/gpfs/scratch/ehpc399/vincent/data/1M_training/eval/eCH/05/*.parquet"
-  [neutral]="/gpfs/scratch/ehpc399/vincent/data/1M_training/eval/neutral/05/*.parquet"
-)
-
-for SPLIT in eCH neutral; do
-  DATA_PATTERN="${DATASETS[$SPLIT]}"
-  DATA_FILES=(${DATA_PATTERN})
-  OUTPUT_NAME="eval_full_1M_05_${SPLIT}.pkl"
-  DISPLAY_NAME="eval_full_1M_05_${SPLIT}"
-
-  if [[ ${#DATA_FILES[@]} -eq 0 ]]; then
-    echo "No parquet files found for ${SPLIT} with pattern: ${DATA_PATTERN}"
-    exit 1
-  fi
-
-  echo "Running 05 full eval for ${SPLIT} with ${#DATA_FILES[@]} files"
-
-  "${PYTHON_BIN}" -m src.train_lightning1 \
-    --predict \
-    --data-test "${DATA_FILES[@]}" \
-    --name-output "${OUTPUT_NAME}" \
-    --data-config "${CFG_DATA}" \
-    -clust \
-    -clust_dim 3 \
-    --network-config "${CFG_NET}" \
-    --model-prefix "${OUTPUT_DIR}" \
-    --load-model-weights-clustering "${CLUSTER_CKPT}" \
-    --load-model-weights "${PROPS_CKPT}" \
-    --wandb-displayname "${DISPLAY_NAME}" \
-    --num-workers 16 \
-    --gpus 0 \
-    --batch-size 1 \
-    --start-lr 1e-3 \
-    --num-epochs 100 \
-    --optimizer ranger \
-    --fetch-step 1 \
-    --condensation \
-    --log-wandb \
-    --wandb-projectname "${WANDB_PROJECT}" \
-    --wandb-entity "${WANDB_ENTITY}" \
-    --frac_cluster_loss 0 \
-    --qmin 1 \
-    --use-average-cc-pos 0.99 \
-    --lr-scheduler reduceplateau \
-    --tracks \
-    --correction \
-    --ec-model gatr-neutrals \
-    --regress-pos \
-    --add-track-chis \
-    --freeze-clustering \
-    --regress-unit-p \
-    --n-layers-PID-head 3 \
-    --separate-PID-GATr \
-    --fetch-by-files \
-    --restrict_PID_charge \
-    --PID-4-class \
-    --pandora
-done
+"${PYTHON_BIN}" -m src.train_lightning1 \
+  --predict \
+  --data-test "${DATA_TEST}" \
+  --name-output "eval_full_500k_05.pkl" \
+  --data-config "${CFG_DATA}" \
+  -clust \
+  -clust_dim 3 \
+  --network-config "${CFG_NET}" \
+  --model-prefix "${OUTPUT_DIR}" \
+  --load-model-weights-clustering "${CLUSTER_CKPT}" \
+  --load-model-weights "${PROPS_CKPT}" \
+  --wandb-displayname "eval_full_500k_05" \
+  --num-workers 16 \
+  --gpus 0 \
+  --batch-size 1 \
+  --start-lr 1e-3 \
+  --num-epochs 100 \
+  --optimizer ranger \
+  --fetch-step 1 \
+  --condensation \
+  --log-wandb \
+  --wandb-projectname "${WANDB_PROJECT}" \
+  --wandb-entity "${WANDB_ENTITY}" \
+  --frac_cluster_loss 0 \
+  --qmin 1 \
+  --use-average-cc-pos 0.99 \
+  --lr-scheduler reduceplateau \
+  --tracks \
+  --correction \
+  --ec-model gatr-neutrals \
+  --regress-pos \
+  --add-track-chis \
+  --freeze-clustering \
+  --regress-unit-p \
+  --n-layers-PID-head 3 \
+  --separate-PID-GATr \
+  --fetch-by-files \
+  --restrict_PID_charge \
+  --PID-4-class

@@ -32,8 +32,26 @@ O5_HITPF="/gpfs/scratch/ehpc399/vincent/models/05_properties_1M_2403/showers_df_
 ARC_PANDORA="/gpfs/scratch/ehpc399/vincent/models/arc_properties_1M_2403/showers_df_evaluation/eval_full_1M_arc_*_pandora.pt"
 O5_PANDORA="/gpfs/scratch/ehpc399/vincent/models/05_properties_1M_2403/showers_df_evaluation/eval_full_1M_05_*_pandora.pt"
 OUTPUT_DIR="/gpfs/scratch/ehpc399/vincent/models/full_evaluation_compare_1M_arc_05"
+TEXLIVE_CACHE_BASE="/gpfs/scratch/ehpc399/vincent/.texlive2020"
+
+export TEXMFVAR="${TEXLIVE_CACHE_BASE}/texmf-var"
+export TEXMFCONFIG="${TEXLIVE_CACHE_BASE}/texmf-config"
+export TEXMFHOME="${TEXLIVE_CACHE_BASE}/texmf-home"
+export MLPF_PLOT_USETEX=1
 
 mkdir -p "${OUTPUT_DIR}"
+mkdir -p "${TEXMFVAR}" "${TEXMFCONFIG}" "${TEXMFHOME}"
+
+echo "Using TeX cache:"
+echo "  TEXMFVAR=${TEXMFVAR}"
+echo "  TEXMFCONFIG=${TEXMFCONFIG}"
+echo "  TEXMFHOME=${TEXMFHOME}"
+
+latex -interaction=nonstopmode \
+  --halt-on-error \
+  --output-directory "${TEXLIVE_CACHE_BASE}" \
+  /home/cern/cern948842/latex_smoke/smoke.tex \
+  >"${TEXLIVE_CACHE_BASE}/job_latex_smoke.log" 2>&1
 
 CMD=(
   "${PYTHON_BIN}" -m src.evaluation.full_evaluation

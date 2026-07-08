@@ -7,6 +7,17 @@ CONDA_BASE="$(dirname "$(dirname "$(which conda)")")"
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
 conda activate /gpfs/scratch/ehpc399/vincent/envs/HitPF
 
+export TEXMFVAR="/gpfs/scratch/ehpc399/vincent/.texlive2020/texmf-var"
+export TEXMFCONFIG="/gpfs/scratch/ehpc399/vincent/.texlive2020/texmf-config"
+export TEXMFHOME="/gpfs/scratch/ehpc399/vincent/.texlive2020/texmf-home"
+export MLPF_PLOT_USETEX=1
+
+echo "Using TeX cache:"
+echo "  TEXMFVAR="
+echo "  TEXMFCONFIG="
+echo "  TEXMFHOME="
+latex -interaction=nonstopmode --halt-on-error --output-directory /gpfs/scratch/ehpc399/vincent/.texlive2020 /home/cern/cern948842/latex_smoke/smoke.tex >/gpfs/scratch/ehpc399/vincent/.texlive2020/job_latex_smoke.log 2>&1
+
 # Full-evaluation outputs for the current 1M properties regression models.
 
 ARC_MLPF="/gpfs/scratch/ehpc399/vincent/models/arc_properties_1M_2403/showers_df_evaluation/eval_full_1M_arc_*.pkl0_0_None.pt"

@@ -93,8 +93,3 @@ datasets/
 # =========================
 .env
 .env.*
-
-scripts/scripts_vincent/obsidian_mlpf/
-
-notebooks/*.png
-scripts/scripts_vincent/obsidian_mlpf/

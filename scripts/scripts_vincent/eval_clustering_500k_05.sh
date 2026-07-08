@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=80
 #SBATCH --gres=gpu:1
-#SBATCH --time=24:00:00
+#SBATCH --time=08:00:00
 #SBATCH --qos=acc_ehpc
 #SBATCH --account=ehpc399
 
@@ -14,20 +14,8 @@ set -euo pipefail
 shopt -s nullglob
 
 ml miniforge/24.3.0-0
-CONDA_BASE="$(dirname "$(dirname "$(which conda)")")"
-source "${CONDA_BASE}/etc/profile.d/conda.sh"
+source "/gpfs/apps/MN5/ACC/MINIFORGE/24.3.0-0/etc/profile.d/conda.sh"
 conda activate /gpfs/scratch/ehpc399/vincent/envs/HitPF
-PYTHON_BIN="/gpfs/scratch/ehpc399/vincent/envs/HitPF/bin/python"
-
-if [[ ! -x "${PYTHON_BIN}" ]]; then
-  echo "Expected python not found: ${PYTHON_BIN}"
-  exit 1
-fi
-
-echo "Conda executable: $(which conda)"
-echo "Python executable in PATH: $(which python)"
-echo "CONDA_PREFIX: ${CONDA_PREFIX:-<unset>}"
-"${PYTHON_BIN}" -c "import sys, torch; print(sys.executable); print(torch.__version__)"
 
 cd /gpfs/scratch/ehpc399/vincent/code/mlpf
 nvidia-smi
@@ -78,7 +66,7 @@ for SPLIT in eCH neutral; do
 
   echo "Running 05 clustering eval for ${SPLIT} with ${#DATA_FILES[@]} files"
 
-  "${PYTHON_BIN}" -m src.train_lightning1 \
+  python -m src.train_lightning1 \
     --predict \
     --data-test "${DATA_FILES[@]}" \
     --name-output "${OUTPUT_NAME}" \

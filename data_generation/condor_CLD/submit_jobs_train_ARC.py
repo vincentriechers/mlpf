@@ -1,11 +1,9 @@
 #!/usr/bin/env python
 import argparse
 import glob
-import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 
 # ____________________________________________________________________________________________________________
@@ -18,75 +16,6 @@ def absoluteFilePaths(directory):
         for f in filenames:
             files.append(os.path.abspath(os.path.join(dirpath, f)))
     return files
-
-
-def collect_existing_outputs(outdir, arc=False, require_pandora=False):
-    existing = {"05": set(), "arc": set()}
-
-    mode_dirs = {"05": os.path.join(outdir, "05")}
-    if arc:
-        mode_dirs["arc"] = os.path.join(outdir, "arc")
-
-    if not require_pandora:
-        for mode, mode_dir in mode_dirs.items():
-            for path in glob.glob(os.path.join(mode_dir, "*.parquet")):
-                existing[mode].add(os.path.abspath(path))
-        return existing
-
-    required_fields = ["X_pandora", "pfo_calohit", "pfo_track"]
-    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json") as tmp:
-        json.dump(
-            {
-                "mode_dirs": mode_dirs,
-                "required_fields": required_fields,
-            },
-            tmp,
-        )
-        payload = tmp.name
-
-    check_cmd = f"""
-source /cvmfs/sft.cern.ch/lcg/views/LCG_108/x86_64-el9-gcc15-opt/setup.sh >/dev/null 2>&1
-python3 - <<'PY'
-import glob
-import json
-import pyarrow.parquet as pq
-
-with open({payload!r}) as f:
-    payload = json.load(f)
-
-required_fields = set(payload["required_fields"])
-valid = {{}}
-for mode, mode_dir in payload["mode_dirs"].items():
-    valid[mode] = []
-    for path in glob.glob(mode_dir + "/*.parquet"):
-        try:
-            schema_fields = set(pq.read_schema(path).names)
-        except Exception:
-            continue
-        if required_fields.issubset(schema_fields):
-            valid[mode].append(path)
-
-print(json.dumps(valid))
-PY
-"""
-
-    try:
-        result = subprocess.run(
-            ["bash", "-lc", check_cmd],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        valid = json.loads(result.stdout)
-        for mode, paths in valid.items():
-            existing[mode] = {os.path.abspath(path) for path in paths}
-    finally:
-        try:
-            os.unlink(payload)
-        except OSError:
-            pass
-
-    return existing
 
 
 # _____________________________________________________________________________________________________________
@@ -138,18 +67,6 @@ def main():
         default="False",
         action="store_true",
     )
-    parser.add_argument(
-        "--pandora",
-        help="require Pandora fields in parquet outputs and resubmit incomplete files",
-        default="False",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--debug-logs",
-        help="write per-job condor .out/.err files to std/ instead of /dev/null",
-        default="False",
-        action="store_true",
-    )
 
     parser.add_argument("--njobs", help="max number of jobs", default=2)
 
@@ -181,9 +98,7 @@ def main():
     cldgeo = args.cldgeo
     cldconfig = args.cldconfig
     gentracking = args.gentracking
-    arc = args.arc
-    pandora = args.pandora
-    debug_logs = args.debug_logs
+    arc = args.arc 
     njobs = int(args.njobs)
     nev = args.nev
     queue = args.queue
@@ -192,13 +107,11 @@ def main():
     os.system("mkdir -p {}".format(outdir))
     os.makedirs(condor_dir, exist_ok=True)
 
-    existing_outputs = collect_existing_outputs(outdir, arc=arc, require_pandora=pandora)
-    print(
-        "Found {} valid 05 parquet files{}".format(
-            len(existing_outputs["05"]),
-            " and {} valid ARC parquet files".format(len(existing_outputs["arc"])) if arc else "",
-        )
-    )
+    # find list of already produced files:
+    list_of_outfiles = []
+    for name in glob.glob("{}/05/*.parquet".format(outdir)):
+        list_of_outfiles.append(name)
+    print(list_of_outfiles)
     script_dir = os.path.dirname(os.path.abspath(__file__))
     script = os.path.join(script_dir, "run_sequence_CLD_train_ARC.sh")
 
@@ -207,77 +120,62 @@ def main():
     submit_log_dir = os.path.join(script_dir, "std")
     os.makedirs(submit_log_dir, exist_ok=True)
 
-    output_target = "/dev/null"
-    error_target = "/dev/null"
-    if debug_logs:
-        output_target = os.path.join(submit_log_dir, "condor.$(ClusterId).$(ProcId).out")
-        error_target = os.path.join(submit_log_dir, "condor.$(ClusterId).$(ProcId).err")
-
     cmdfile = """# here goes your shell script
 executable    = {}
 
 # here you specify where to put .log, .out and .err files
-output                = {}
-error                 = {}
+output                = /dev/null
+error                 = /dev/null
 log                   = {}/condor.$(ClusterId).log
 
 +AccountingGroup = "group_u_CMST3.all"
 +JobFlavour    = "{}"
 """.format(
-        script, output_target, error_target, submit_log_dir, queue
+        script, submit_log_dir, queue
     )
 
     print(njobs)
-    for seed in range(1, njobs + 1):
-        seed = str(seed)
-        output_file_05 = os.path.abspath(os.path.join(outdir, "05", f"pf_tree_{seed}.parquet"))
-        output_file_arc = os.path.abspath(os.path.join(outdir, "arc", f"pf_tree_{seed}_arc.parquet"))
+    for job in range(njobs+1):
+        if (job>  0):
+            seed = str(job + 1)
+            basename = "05/pf_tree_" + seed + ".parquet" 
+            outputFile = outdir + "/" + basename
+            print(outputFile)
+            # print outdir, basename, outputFile
+            if not outputFile in list_of_outfiles:
+                print("{} : missing output file ".format(outputFile))
+                jobCount += 1
 
-        missing_05 = output_file_05 not in existing_outputs["05"]
-        missing_arc = arc and output_file_arc not in existing_outputs["arc"]
+                args = [
+                f"--homedir {homedir}",
+                f"--guncard {config}",
+                f"--nev {nev}",
+                f"--seed {seed}",
+                f"--outputdir {outdir}",
+                f"--dir {condor_dir}",
+                f"--sample {sample}",
+                f"--cldgeo {cldgeo}",
+                ]
+                # Only pass cldconfig if provided
+                if cldconfig:
+                    args.append(f"--pathcldconfig {cldconfig}")
 
-        if missing_05 or missing_arc:
-            missing_parts = []
-            if missing_05:
-                missing_parts.append("05")
-            if missing_arc:
-                missing_parts.append("arc")
-            print("{} : missing {}".format(seed, ",".join(missing_parts)))
-            jobCount += 1
+                # Convert string booleans safely
+                if gentracking:
+                    args.append("--gentracking")
 
-            args = [
-            f"--homedir {homedir}",
-            f"--guncard {config}",
-            f"--nev {nev}",
-            f"--seed {seed}",
-            f"--outputdir {outdir}",
-            f"--dir {condor_dir}",
-            f"--sample {sample}",
-            f"--cldgeo {cldgeo}",
-            ]
-            # Only pass cldconfig if provided
-            if cldconfig:
-                args.append(f"--pathcldconfig {cldconfig}")
+                if arc:
+                    args.append("--arc")
 
-            # Convert string booleans safely
-            if gentracking:
-                args.append("--gentracking")
+                argts = " ".join(args)
 
-            if arc:
-                args.append("--arc")
+                cmdfile += 'arguments="{}"\n'.format(argts)
+                cmdfile += "queue\n"
 
-            if pandora:
-                args.append("--pandora")
-
-            argts = " ".join(args)
-
-            cmdfile += 'arguments="{}"\n'.format(argts)
-            cmdfile += "queue\n"
-
-            cmd = "rm -rf job*; ./{} {}".format(script, argts)
-            if jobCount == 1:
-                print("")
-                print(cmd)
+                cmd = "rm -rf job*; ./{} {}".format(script, argts)
+                if jobCount == 1:
+                    print("")
+                    print(cmd)
 
     with open(os.path.join(script_dir, "condor_{}.sub".format(sample)), "w") as f:
         f.write(cmdfile)

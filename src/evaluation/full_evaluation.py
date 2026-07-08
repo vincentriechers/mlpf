@@ -18,7 +18,9 @@ python -m src.evaluation.full_evaluation \
 import argparse
 import glob
 import os
+import shutil
 import sys
+import tempfile
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -27,6 +29,7 @@ import pandas as pd
 import seaborn as sns
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
+from matplotlib.ticker import AutoMinorLocator, FixedLocator, FuncFormatter, NullFormatter
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
@@ -38,9 +41,99 @@ from src.utils.inference.pandas_helpers import concat_with_batch_fix, open_mlpf_
 from src.utils.pid_conversion import our_to_pandora_mapping, pandora_to_our_mapping, pid_conversion_dict
 
 
-matplotlib.rc("font", size=15)
-plt.rc("text", usetex=False)
-plt.rc("font", family="serif")
+DEFAULT_PLOT_FONT_SIZE = 26
+DEFAULT_PLOT_LINEWIDTH = 3.0
+DEFAULT_PLOT_MARKERSIZE = 10
+DEFAULT_PLOT_AXES_LINEWIDTH = 1.6
+DEFAULT_PLOT_TICK_WIDTH = 1.5
+LOG_ENERGY_TICK_CANDIDATES = np.array([0.1, 0.2, 0.3, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 30.0, 50.0])
+LOG_ENERGY_MAJOR_TICK_CANDIDATES = np.array([0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0])
+
+
+def _env_flag(name, default="auto"):
+    value = os.environ.get(name, default)
+    if value is None:
+        return default
+    return str(value).strip().lower()
+
+
+def _can_use_latex():
+    required_commands = ("latex", "dvipng", "gs")
+    return all(shutil.which(command) for command in required_commands)
+
+
+def _latex_smoke_test():
+    if not _can_use_latex():
+        return False
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tex_path = os.path.join(tmpdir, "smoke.tex")
+            with open(tex_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    r"\documentclass{article}" "\n"
+                    r"\begin{document}" "\n"
+                    r"$lp$" "\n"
+                    r"\end{document}" "\n"
+                )
+            import subprocess
+
+            result = subprocess.run(
+                [
+                    "latex",
+                    "-interaction=nonstopmode",
+                    "--halt-on-error",
+                    tex_path,
+                ],
+                cwd=tmpdir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                print("[plot-style] disabling usetex because LaTeX smoke test failed:")
+                print(result.stdout[-1200:])
+                return False
+            return True
+    except Exception as exc:
+        print(f"[plot-style] disabling usetex because LaTeX smoke test raised: {exc}")
+        return False
+
+
+def configure_plot_style():
+    requested = _env_flag("MLPF_PLOT_USETEX", "auto")
+    if requested in {"1", "true", "yes", "on"}:
+        use_tex = _latex_smoke_test()
+    elif requested in {"0", "false", "no", "off"}:
+        use_tex = False
+    else:
+        use_tex = _latex_smoke_test()
+
+    matplotlib.rcParams.update(
+        {
+            "text.usetex": use_tex,
+            "font.family": "serif",
+            "font.size": DEFAULT_PLOT_FONT_SIZE,
+            "axes.labelsize": DEFAULT_PLOT_FONT_SIZE,
+            "axes.titlesize": DEFAULT_PLOT_FONT_SIZE + 1,
+            "axes.linewidth": DEFAULT_PLOT_AXES_LINEWIDTH,
+            "xtick.labelsize": DEFAULT_PLOT_FONT_SIZE - 1,
+            "ytick.labelsize": DEFAULT_PLOT_FONT_SIZE - 1,
+            "xtick.major.width": DEFAULT_PLOT_TICK_WIDTH,
+            "ytick.major.width": DEFAULT_PLOT_TICK_WIDTH,
+            "xtick.minor.width": DEFAULT_PLOT_TICK_WIDTH,
+            "ytick.minor.width": DEFAULT_PLOT_TICK_WIDTH,
+            "legend.fontsize": DEFAULT_PLOT_FONT_SIZE - 1,
+            "legend.title_fontsize": DEFAULT_PLOT_FONT_SIZE - 1,
+            "lines.linewidth": DEFAULT_PLOT_LINEWIDTH,
+            "lines.markersize": DEFAULT_PLOT_MARKERSIZE,
+            "grid.linewidth": 0.9,
+        }
+    )
+    if use_tex:
+        matplotlib.rcParams["font.serif"] = ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"]
+    print(f"[plot-style] text.usetex={use_tex} (MLPF_PLOT_USETEX={requested})")
+    return use_tex
 
 
 GEOMETRY_COLORS = {
@@ -59,8 +152,8 @@ PLOT_COLORS = {
     "o2_v05 Pandora": "#4F84C4",
 }
 RATIO_METHOD_STYLES = {
-    "HitPF": {"color": "#1D3557", "marker": "o", "linestyle": "-", "markersize": 5, "alpha": 0.15},
-    "Pandora": {"color": "#9C6644", "marker": "^", "linestyle": "--", "markersize": 5, "alpha": 0.15},
+    "HitPF": {"color": "#1D3557", "marker": "o", "linestyle": "-", "markersize": 6, "alpha": 0.15},
+    "Pandora": {"color": "#9C6644", "marker": "^", "linestyle": "--", "markersize": 6, "alpha": 0.15},
 }
 
 CONFUSION_CLASS_ORDER = [1, 3, 2, 0, 4]
@@ -90,7 +183,8 @@ PARTICLES = [
         "truth_ids": our_to_pandora_mapping[1],
         "class_id": 1,
         "fake_pid": 211,
-        "resolution_truth_ids": [211, -211, 2212, -2212],
+        "resolution_truth_ids": [211, -211, 2212, -2212, 321, -321],
+        "resolution_reco_ids": [211, -211, 2212, -2212, 321, -321],
         "resolution_pid": 211,
         "xlim": (0.3, 40.0),
     },
@@ -111,6 +205,7 @@ PARTICLES = [
         "class_id": 2,
         "fake_pid": 130,
         "resolution_truth_ids": [2112, 130],
+        "resolution_reco_ids": [2112, 130],
         "resolution_pid": 2112,
         "xlim": (1.5, 40.0),
     },
@@ -163,6 +258,79 @@ EVENT_COMPONENTS = [
         "logy": False,
     },
 ]
+
+PARTICLE_BY_KEY = {particle["key"]: particle for particle in PARTICLES}
+RESOLUTION_PARTICLE_KEYS = ("photons", "neutral_hadrons")
+RESOLUTION_PARTICLES = [PARTICLE_BY_KEY[key] for key in RESOLUTION_PARTICLE_KEYS]
+
+THREE_PANEL_FIGSIZE = (21, 7.4)
+THREE_PANEL_GRID_KW = {
+    "left": 0.070,
+    "right": 0.995,
+    "bottom": 0.16,
+    "top": 0.90,
+    "wspace": 0.22,
+}
+THREE_PANEL_RATIO_FIGSIZE = (21, 9.3)
+THREE_PANEL_RATIO_GRID_KW = {
+    "left": 0.070,
+    "right": 0.995,
+    "bottom": 0.10,
+    "top": 0.92,
+    "wspace": 0.22,
+    "hspace": 0.08,
+}
+TWO_PANEL_CENTERED_GRID_KW = {
+    "left": 0.075,
+    "right": 0.995,
+    "bottom": 0.13,
+    "top": 0.90,
+    "wspace": 0.24,
+    "width_ratios": [0.5, 1.0, 1.0, 0.5],
+}
+TWO_PANEL_CENTERED_RATIO_GRID_KW = {
+    "left": 0.075,
+    "right": 0.995,
+    "bottom": 0.11,
+    "top": 0.92,
+    "wspace": 0.24,
+    "hspace": 0.08,
+    "width_ratios": [0.5, 1.0, 1.0, 0.5],
+}
+CONFUSION_FIGSIZE = (13.5, 9.8 * len(CONFUSION_ENERGY_BINS))
+CONFUSION_GRID_KW = {
+    "left": 0.050,
+    "right": 0.995,
+    "bottom": 0.14,
+    "top": 0.96,
+    "hspace": 0.24,
+}
+EVENT_FIGSIZE = (16, 6.6)
+EVENT_GRID_KW = {
+    "left": 0.085,
+    "right": 0.995,
+    "bottom": 0.14,
+    "top": 0.88,
+    "wspace": 0.22,
+}
+
+
+def save_fixed_canvas(fig, output_path):
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
+def make_centered_two_panel_axes(fig):
+    grid = fig.add_gridspec(1, 4, **TWO_PANEL_CENTERED_GRID_KW)
+    return [fig.add_subplot(grid[0, 1]), fig.add_subplot(grid[0, 2])]
+
+
+def make_centered_two_panel_ratio_axes(fig):
+    grid = fig.add_gridspec(2, 4, height_ratios=[3.2, 1.2], **TWO_PANEL_CENTERED_RATIO_GRID_KW)
+    return [
+        (fig.add_subplot(grid[0, 1]), fig.add_subplot(grid[1, 1])),
+        (fig.add_subplot(grid[0, 2]), fig.add_subplot(grid[1, 2])),
+    ]
 
 
 def parse_args():
@@ -378,7 +546,7 @@ def build_style(label, confusion=False):
         "color": color,
         "marker": "^" if is_pandora else "o",
         "linestyle": "--" if is_pandora else "-",
-        "markersize": 6 if is_pandora else 7,
+        "markersize": 8 if is_pandora else 9,
         "alpha": 0.10 if is_pandora else 0.14,
     }
 
@@ -493,13 +661,33 @@ def set_metric_ylim(ax, metric_key, all_y):
         return
 
     positive_y = np.asarray([y for y in all_y if np.isfinite(y) and y > 0.0], dtype=float)
-    if len(positive_y):
-        ymin = 10 ** np.floor(np.log10(np.min(positive_y)))
-        ymax = 10 ** np.ceil(np.log10(np.max(positive_y) * 1.5))
+    if len(positive_y) == 0:
+        ax.set_ylim(1e-4, 1.0)
+        return
+
+    if metric_key in {"fake_rate", "fake_energy_fraction"}:
+        if len(positive_y) >= 4:
+            robust_low = np.nanpercentile(positive_y, 10)
+            robust_high = np.nanpercentile(positive_y, 90)
+        else:
+            robust_low = np.min(positive_y)
+            robust_high = np.max(positive_y)
+        ymin = 10 ** np.floor(np.log10(max(np.min(positive_y), robust_low / 1.6)))
+        ymax = 10 ** np.ceil(np.log10(max(np.max(positive_y), robust_high * 1.6)))
+        if metric_key == "fake_energy_fraction":
+            ymax = max(ymax, 1e-1)
+        ax.set_ylim(ymin, ymax)
+        return
+
+    if len(positive_y) >= 4:
+        lower = np.nanpercentile(positive_y, 5)
+        upper = np.nanpercentile(positive_y, 95)
     else:
-        ymin, ymax = (1e-4, 1.0)
-    if "fraction" in metric_key:
-        ymax = max(ymax, 1e-3)
+        lower = np.min(positive_y)
+        upper = np.max(positive_y)
+    span = max(upper - lower, 0.03)
+    ymin = max(0.0, lower - 0.12 * span)
+    ymax = upper + 0.12 * span
     ax.set_ylim(ymin, ymax)
 
 
@@ -509,12 +697,13 @@ def style_metric_axis(ax, particle, ylabel, metric_key, all_y, logy):
     ax.set_ylabel(ylabel)
     ax.set_xlim(*particle["xlim"])
     ax.set_xscale("log")
+    apply_log_energy_ticks(ax, particle["xlim"])
     ax.grid(True, axis="y", alpha=0.25, linestyle="--")
     ax.set_axisbelow(True)
     set_metric_ylim(ax, metric_key, all_y)
     if logy:
         ax.set_yscale("log")
-    ax.legend(fontsize=15, title="Geometry / method", title_fontsize=13)
+    ax.legend(fontsize=21, title="Geometry / method", title_fontsize=19)
 
 
 def style_ratio_axis(ax, particle, ratio_ylabel, ratio_values, metric_key=None):
@@ -523,6 +712,7 @@ def style_ratio_axis(ax, particle, ratio_ylabel, ratio_values, metric_key=None):
     ax.set_ylabel(ratio_ylabel)
     ax.set_xlim(*particle["xlim"])
     ax.set_xscale("log")
+    apply_log_energy_ticks(ax, particle["xlim"])
     ax.grid(True, axis="y", alpha=0.25, linestyle="--")
     ax.set_axisbelow(True)
     ratio_values = np.asarray([y for y in ratio_values if np.isfinite(y)], dtype=float)
@@ -544,7 +734,8 @@ def style_ratio_axis(ax, particle, ratio_ylabel, ratio_values, metric_key=None):
         ax.set_ylim(ymin, ymax)
     else:
         ax.set_ylim(0.85, 1.15)
-    ax.legend(fontsize=12, title="Method", title_fontsize=11, loc="best")
+    apply_ratio_y_ticks(ax)
+    ax.legend(fontsize=16, loc="best")
 
 
 def style_resolution_ratio_axis(ax, particle, ratio_ylabel, ratio_values):
@@ -553,6 +744,7 @@ def style_resolution_ratio_axis(ax, particle, ratio_ylabel, ratio_values):
     ax.set_ylabel(ratio_ylabel)
     ax.set_xlim(*particle["xlim"])
     ax.set_xscale("log")
+    apply_log_energy_ticks(ax, particle["xlim"])
     ax.grid(True, axis="y", alpha=0.25, linestyle="--")
     ax.set_axisbelow(True)
     ratio_values = np.asarray([y for y in ratio_values if np.isfinite(y)], dtype=float)
@@ -571,20 +763,97 @@ def style_resolution_ratio_axis(ax, particle, ratio_ylabel, ratio_values):
         ax.set_ylim(ymin, ymax)
     else:
         ax.set_ylim(0.95, 1.05)
-    ax.legend(fontsize=12, title="Method", title_fontsize=11, loc="best")
+    apply_ratio_y_ticks(ax)
+    ax.legend(fontsize=16, loc="best")
+
+
+def apply_ratio_y_ticks(ax):
+    ymin, ymax = ax.get_ylim()
+    span = ymax - ymin
+
+    if span <= 0.25:
+        step = 0.05
+    elif span <= 0.6:
+        step = 0.1
+    elif span <= 1.2:
+        step = 0.2
+    elif span <= 2.5:
+        step = 0.5
+    else:
+        step = 1.0
+
+    ticks = [1.0]
+    for direction in (-1.0, 1.0):
+        value = 1.0 + direction * step
+        while ymin <= value <= ymax:
+            ticks.append(value)
+            value += direction * step
+
+    ticks = sorted({round(float(tick), 10) for tick in ticks if ymin - 1e-9 <= tick <= ymax + 1e-9})
+    ax.yaxis.set_major_locator(FixedLocator(ticks))
+    ax.yaxis.set_major_formatter(FuncFormatter(format_ratio_tick))
+    ax.yaxis.set_minor_locator(AutoMinorLocator(2))
+
+
+def format_ratio_tick(value, _position):
+    if np.isclose(value, round(value)):
+        return f"{int(round(value))}"
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def format_log_energy_tick(value, _position):
+    if value >= 1.0 and np.isclose(value, round(value)):
+        return f"{int(round(value))}"
+    return f"{value:g}"
+
+
+def apply_log_energy_ticks(ax, xlim):
+    xmin, xmax = xlim
+    major_ticks = [tick for tick in LOG_ENERGY_MAJOR_TICK_CANDIDATES if xmin <= tick <= xmax]
+    if len(major_ticks) < 2:
+        major_ticks = [tick for tick in LOG_ENERGY_TICK_CANDIDATES if xmin <= tick <= xmax]
+    if xmin <= 1.0 <= xmax and not any(np.isclose(tick, 1.0) for tick in major_ticks):
+        major_ticks.append(1.0)
+        major_ticks = sorted(major_ticks)
+
+    minor_ticks = [
+        tick
+        for tick in LOG_ENERGY_TICK_CANDIDATES
+        if xmin <= tick <= xmax and not any(np.isclose(tick, major_tick) for major_tick in major_ticks)
+    ]
+
+    if major_ticks:
+        ax.xaxis.set_major_locator(FixedLocator(major_ticks))
+        ax.xaxis.set_major_formatter(FuncFormatter(format_log_energy_tick))
+    if minor_ticks:
+        ax.xaxis.set_minor_locator(FixedLocator(minor_ticks))
+        ax.xaxis.set_minor_formatter(NullFormatter())
 
 
 def get_resolution_ylim(particle_key, positive_y):
     positive_y = np.asarray([y for y in positive_y if np.isfinite(y) and y > 0.0], dtype=float)
     if len(positive_y) == 0:
         return (0.0, 0.1)
+
+    max_y = np.max(positive_y)
+    if len(positive_y) >= 4:
+        percentile = 85 if particle_key == "charged_hadrons" else 90
+        robust_high = np.nanpercentile(positive_y, percentile)
+    else:
+        robust_high = max_y
+
+    # Keep the robust envelope for most of the curve, but always leave headroom
+    # for the highest low-energy bin so the first point is never clipped.
+    ymax = max(robust_high * 1.25, max_y * 1.06)
+    ymin = 0.0
     if particle_key == "charged_hadrons":
-        robust_high = np.nanpercentile(positive_y, 85)
-        ymax = max(0.05, min(0.25, robust_high * 1.25))
-        return (0.0, ymax)
-    ymax = np.max(positive_y) * 1.2
-    if ymax < 0.03:
-        ymax = 0.03
+        ymax = min(max(ymax, 0.05), 0.10)
+    elif particle_key == "photons":
+        ymax = min(max(ymax, 0.03), 0.35)
+    elif particle_key == "neutral_hadrons":
+        ymax = min(max(ymax, 0.12), 1.4)
+    else:
+        ymax = max(ymax, 0.03)
     return (0.0, ymax)
 
 
@@ -635,10 +904,7 @@ def filter_resolution_plot_points(particle_key, x_values, y_values, y_errors=Non
     if y_errors is not None:
         y_errors = np.asarray(y_errors, dtype=float)
         valid &= np.isfinite(y_errors)
-
-    if y_errors is None:
-        return valid
-    return valid, y_errors
+    return valid
 
 
 def mixed_percentages(cm, fake_row, fake_norm="column"):
@@ -709,15 +975,23 @@ def plot_confusion_matrix_grid(datasets, output_path):
     if missing_labels:
         raise ValueError(f"Missing datasets for combined confusion matrix: {missing_labels}")
 
-    fig, axes = plt.subplots(1, len(CONFUSION_ENERGY_BINS), figsize=(12.5 * len(CONFUSION_ENERGY_BINS), 11.0))
-    if len(CONFUSION_ENERGY_BINS) == 1:
-        axes = np.asarray([axes])
+    fig, axes = plt.subplots(
+        len(CONFUSION_ENERGY_BINS),
+        1,
+        figsize=CONFUSION_FIGSIZE,
+        gridspec_kw=CONFUSION_GRID_KW,
+    )
+    axes = np.atleast_1d(axes)
 
     datasets_in_cell_order = [datasets_by_label[label] for label, _ in CONFUSION_DATASET_LAYOUT]
     x_labels = [CONFUSION_CLASS_NAMES[cls] for cls in CONFUSION_CLASS_ORDER] + ["missed"]
     y_labels = [CONFUSION_CLASS_NAMES[cls] for cls in CONFUSION_CLASS_ORDER] + ["fake"]
     fake_row = len(CONFUSION_CLASS_ORDER)
-    mini_box_size = 0.40
+    mini_box_size = 0.52
+    ntrue_box_width = 0.58
+    ntrue_box_height = 0.34
+    percent_box_width = 0.42
+    percent_box_height = 0.34
     mini_box_cmaps = {
         label: sns.blend_palette(["#ffffff", build_style(label, confusion=True)["color"]], as_cmap=True)
         for label, _ in CONFUSION_DATASET_LAYOUT
@@ -733,35 +1007,36 @@ def plot_confusion_matrix_grid(datasets, output_path):
 
         n_rows = len(y_labels)
         n_cols = len(x_labels)
-        ax.set_xlim(-1.35, n_cols)
+        ax.set_xlim(-1.65, n_cols)
         ax.set_ylim(n_rows, 0)
         ax.set_aspect("equal")
 
-        ax.text(-0.68, -0.18, r"$N_{\mathrm{true}}$", ha="center", va="center", fontsize=13)
+        ax.text(-0.83, -0.22, r"$N_{\mathrm{true}}$", ha="center", va="center", fontsize=29, fontweight="bold")
 
         for i in range(n_rows):
             if i < fake_row:
                 ax.add_patch(
-                    Rectangle((-1.30, i), 1.15, 1, facecolor="#fafafa", edgecolor="0.45", linewidth=1.2)
+                    Rectangle((-1.60, i), 1.45, 1, facecolor="#fafafa", edgecolor="0.45", linewidth=1.2)
                 )
-                ax.plot([-0.725, -0.725], [i, i + 1], color="0.45", linewidth=0.8)
-                ax.plot([-1.30, -0.15], [i + 0.5, i + 0.5], color="0.45", linewidth=0.8)
+                ax.plot([-0.875, -0.875], [i, i + 1], color="0.45", linewidth=0.9)
+                ax.plot([-1.60, -0.15], [i + 0.5, i + 0.5], color="0.45", linewidth=0.9)
                 for (label, (x_frac, y_frac)), matrix in zip(CONFUSION_DATASET_LAYOUT, matrices):
                     style = build_style(label, confusion=True)
                     count_value = int(np.sum(matrix[i, :]))
-                    x_center = -1.30 + 1.15 * x_frac
+                    x_center = -1.60 + 1.45 * x_frac
                     y_center = i + y_frac
-                    x0 = x_center - mini_box_size * 0.9 / 2.0
-                    y0 = y_center - mini_box_size / 2.0
+                    x0 = x_center - ntrue_box_width / 2.0
+                    y0 = y_center - ntrue_box_height / 2.0
                     ax.add_patch(
                         Rectangle(
                             (x0, y0),
-                            mini_box_size * 0.9,
-                            mini_box_size,
+                            ntrue_box_width,
+                            ntrue_box_height,
                             facecolor="white",
                             edgecolor=style["color"],
-                            linewidth=1.6,
+                            linewidth=1.8,
                             linestyle=style["linestyle"],
+                            zorder=3,
                         )
                     )
                     ax.text(
@@ -770,29 +1045,32 @@ def plot_confusion_matrix_grid(datasets, output_path):
                         f"{count_value}",
                         ha="center",
                         va="center",
-                        fontsize=7,
+                        fontsize=16,
+                        fontweight="bold",
                         color=style["color"],
+                        zorder=4,
                     )
             for j in range(n_cols):
                 ax.add_patch(
-                    Rectangle((j, i), 1, 1, facecolor="#f8f8f8", edgecolor="0.45", linewidth=1.5)
+                    Rectangle((j, i), 1, 1, facecolor="#f8f8f8", edgecolor="0.45", linewidth=1.0)
                 )
-                ax.plot([j + 0.5, j + 0.5], [i, i + 1], color="0.45", linewidth=1.0)
-                ax.plot([j, j + 1], [i + 0.5, i + 0.5], color="0.45", linewidth=1.0)
+                ax.plot([j + 0.5, j + 0.5], [i, i + 1], color="0.45", linewidth=0.9)
+                ax.plot([j, j + 1], [i + 0.5, i + 0.5], color="0.45", linewidth=0.9)
                 for (label, (x_frac, y_frac)), matrix_percent in zip(CONFUSION_DATASET_LAYOUT, percentages):
                     style = build_style(label, confusion=True)
-                    x0 = j + x_frac - mini_box_size / 2.0
-                    y0 = i + y_frac - mini_box_size / 2.0
+                    x0 = j + x_frac - percent_box_width / 2.0
+                    y0 = i + y_frac - percent_box_height / 2.0
                     percent_value = float(np.clip(matrix_percent[i, j], 0.0, 100.0))
                     ax.add_patch(
                         Rectangle(
                             (x0, y0),
-                            mini_box_size,
-                            mini_box_size,
-                            facecolor=mini_box_cmaps[label](0.03 + 0.97 * percent_value / 100.0),
+                            percent_box_width,
+                            percent_box_height,
+                            facecolor=mini_box_cmaps[label](0.04 + 0.96 * (percent_value / 100.0) ** 1.15),
                             edgecolor=style["color"],
                             linewidth=1.8,
                             linestyle=style["linestyle"],
+                            zorder=3,
                         )
                     )
                     ax.text(
@@ -801,21 +1079,27 @@ def plot_confusion_matrix_grid(datasets, output_path):
                         f"{int(np.rint(percent_value))}",
                         ha="center",
                         va="center",
-                        fontsize=8,
-                        color="black" if percent_value < 65.0 else "white",
+                        fontsize=23,
+                        fontweight="bold",
+                        color="black" if percent_value < 62.0 else "white",
+                        zorder=4,
                     )
                 ax.add_patch(
-                    Rectangle((j, i), 1, 1, facecolor="none", edgecolor="0.20", linewidth=2.4)
+                    Rectangle((j, i), 1, 1, facecolor="none", edgecolor="0.20", linewidth=1.4, alpha=0.8, zorder=2)
                 )
 
-        ax.hlines(fake_row, xmin=-1.35, xmax=n_cols, linewidth=2.4, color="black")
+        ax.hlines(fake_row, xmin=-1.65, xmax=n_cols, linewidth=1.6, color="black", alpha=0.85)
         ax.set_xticks(np.arange(n_cols) + 0.5)
         ax.set_yticks(np.arange(n_rows) + 0.5)
-        ax.set_xticklabels(x_labels, rotation=0)
-        ax.set_yticklabels(y_labels, rotation=0)
-        ax.set_xlabel("Predicted")
-        ax.set_ylabel("True")
-        ax.set_title(f"{energy_low:.0f} GeV < E < {energy_high:.0f} GeV", fontsize=18)
+        ax.set_xticklabels(x_labels, rotation=0, fontsize=30)
+        ax.set_yticklabels(y_labels, rotation=0, fontsize=30)
+        ax.set_xlabel("Predicted", fontsize=33, fontweight="bold")
+        ax.set_ylabel("True", fontsize=33, fontweight="bold")
+        ax.set_title(
+            rf"${energy_low:.0f}\,\mathrm{{GeV}} < E < {energy_high:.0f}\,\mathrm{{GeV}}$",
+            fontsize=37,
+            fontweight="bold",
+        )
         for spine in ax.spines.values():
             spine.set_visible(False)
 
@@ -828,18 +1112,23 @@ def plot_confusion_matrix_grid(datasets, output_path):
                 [0],
                 color=style["color"],
                 linestyle=style["linestyle"],
-                linewidth=2.0,
+                linewidth=2.2,
                 marker="s",
-                markersize=8,
+                markersize=11,
                 markerfacecolor="white",
                 markeredgecolor=style["color"],
                 label=label,
             )
         )
-    fig.legend(handles=legend_handles, loc="lower center", ncol=4, frameon=False, bbox_to_anchor=(0.5, 0.01))
-    fig.tight_layout(rect=(0.0, 0.06, 1.0, 1.0))
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    fig.legend(
+        handles=legend_handles,
+        loc="lower center",
+        ncol=2,
+        frameon=False,
+        bbox_to_anchor=(0.5, 0.025),
+        fontsize=23,
+    )
+    save_fixed_canvas(fig, output_path)
 
 
 def compute_particle_curves(frame, is_pandora):
@@ -915,7 +1204,7 @@ def summarize_run(label, frame, is_pandora):
 
 
 def plot_metric_grid(model_curves, metric_key, error_key, ylabel, output_path, logy=False):
-    fig, axes = plt.subplots(1, 3, figsize=(32, 10))
+    fig, axes = plt.subplots(1, 3, figsize=THREE_PANEL_FIGSIZE, gridspec_kw=THREE_PANEL_GRID_KW)
     scale = metric_scale(metric_key)
 
     for ax, particle in zip(axes, PARTICLES):
@@ -945,15 +1234,14 @@ def plot_metric_grid(model_curves, metric_key, error_key, ylabel, output_path, l
 
         style_metric_axis(ax, particle, ylabel, metric_key, all_y, logy)
 
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    save_fixed_canvas(fig, output_path)
 
 
 def plot_metric_grid_with_ratio(model_curves, metric_key, error_key, ylabel, output_path, logy=False):
-    fig = plt.figure(figsize=(32, 13))
-    grid = fig.add_gridspec(2, 3, height_ratios=[3.2, 1.2], hspace=0.08, wspace=0.25)
+    fig = plt.figure(figsize=THREE_PANEL_RATIO_FIGSIZE)
+    grid = fig.add_gridspec(2, 3, height_ratios=[3.2, 1.2], **THREE_PANEL_RATIO_GRID_KW)
     scale = metric_scale(metric_key)
+    ratio_pairs = build_ratio_pairs(model_curves)
 
     for column_idx, particle in enumerate(PARTICLES):
         ax = fig.add_subplot(grid[0, column_idx])
@@ -988,7 +1276,6 @@ def plot_metric_grid_with_ratio(model_curves, metric_key, error_key, ylabel, out
         plt.setp(ax.get_xticklabels(), visible=False)
         ax.set_xlabel("")
 
-        ratio_pairs = build_ratio_pairs(model_curves)
         for method_key, numerator_label, denominator_label in ratio_pairs:
             numerator_curve = model_curves[numerator_label][key]
             denominator_curve = model_curves[denominator_label][key]
@@ -1018,9 +1305,7 @@ def plot_metric_grid_with_ratio(model_curves, metric_key, error_key, ylabel, out
 
         style_ratio_axis(ratio_ax, particle, "o3_v01 / o2_v05", ratio_values_all, metric_key=metric_key)
 
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    save_fixed_canvas(fig, output_path)
 
 
 def compute_event_distributions(frame, is_pandora):
@@ -1048,15 +1333,17 @@ def _plot_histogram(ax, values, bins, style, label):
     if not len(values):
         return
     weights = np.ones_like(values) / len(values)
+    line_alpha = 0.82 if style["linestyle"] == "-" else 0.72
     ax.hist(
         values,
         bins=bins,
         histtype="step",
         weights=weights,
         color=style["color"],
-        linewidth=2,
+        linewidth=2.4,
         linestyle=style["linestyle"],
         label=label,
+        alpha=line_alpha,
     )
 
 
@@ -1085,7 +1372,7 @@ def plot_event_comparison(
     bins=None,
     logy=False,
 ):
-    fig, axes = plt.subplots(1, 2, figsize=(18, 7))
+    fig, axes = plt.subplots(1, 2, figsize=EVENT_FIGSIZE, gridspec_kw=EVENT_GRID_KW)
     if bins is None:
         bins = np.linspace(0.5, 1.25, 160)
 
@@ -1121,17 +1408,15 @@ def plot_event_comparison(
     axes[0].set_xlim(*xlim)
     axes[1].set_xlim(*xlim)
     if component_label:
-        fig.suptitle(component_label, fontsize=18, y=0.98)
+        fig.suptitle(component_label, fontsize=28, y=0.96)
     for ax in axes:
         ax.grid(True, alpha=0.25, linestyle="--")
         if logy:
             ax.set_yscale("log")
         handles, labels = ax.get_legend_handles_labels()
         if handles:
-            ax.legend(fontsize=16, title="Geometry / method", title_fontsize=14)
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96) if component_label else None)
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+            ax.legend(fontsize=19, title="Geometry / method", title_fontsize=17)
+    save_fixed_canvas(fig, output_path)
 
 
 def compute_resolution_curves(frame, is_pandora):
@@ -1139,7 +1424,7 @@ def compute_resolution_curves(frame, is_pandora):
     for particle in PARTICLES:
         subset = frame[frame["pid"].isin(particle["resolution_truth_ids"])].copy()
         if is_pandora:
-            subset = subset[subset["pandora_pid"] == particle["resolution_pid"]]
+            subset = subset[subset["pandora_pid"].isin(particle.get("resolution_reco_ids", [particle["resolution_pid"]]))]
         else:
             subset = subset[subset["pred_pid_matched"] == particle["class_id"]]
         (
@@ -1175,7 +1460,7 @@ def compute_resolution_curves(frame, is_pandora):
             mass_zero=False,
             ML_pid=True,
             pid=particle["resolution_pid"],
-            ch=particle["resolution_pid"] == 211,
+            ch=particle["key"] == "charged_hadrons",
         )
 
         mean = np.asarray(mean)
@@ -1195,9 +1480,10 @@ def compute_resolution_curves(frame, is_pandora):
 
 
 def plot_resolution_comparison(model_curves, output_path):
-    fig, axes = plt.subplots(1, 3, figsize=(32, 10))
+    fig = plt.figure(figsize=THREE_PANEL_FIGSIZE)
+    axes = make_centered_two_panel_axes(fig)
 
-    for ax, particle in zip(axes, PARTICLES):
+    for ax, particle in zip(axes, RESOLUTION_PARTICLES):
         key = particle["key"]
         all_y = []
         for label, curves in ordered_curve_items(model_curves):
@@ -1226,24 +1512,21 @@ def plot_resolution_comparison(model_curves, output_path):
         ax.set_ylabel(r"Energy resolution $\sigma/\mu$")
         ax.set_xlim(*particle["xlim"])
         ax.set_xscale("log")
-        ax.set_xticks([x for x in [0.1, 0.3, 1.0, 3.0, 10.0, 30.0] if particle["xlim"][0] <= x <= particle["xlim"][1]])
+        apply_log_energy_ticks(ax, particle["xlim"])
         ax.grid(True, axis="y", alpha=0.25, linestyle="--")
         ax.set_axisbelow(True)
         ax.set_ylim(*get_resolution_ylim(particle["key"], all_y))
-        ax.legend(fontsize=16, title="Geometry / method", title_fontsize=14)
+        ax.legend(fontsize=19, title="Geometry / method", title_fontsize=17)
 
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    save_fixed_canvas(fig, output_path)
 
 
 def plot_resolution_comparison_with_ratio(model_curves, output_path):
-    fig = plt.figure(figsize=(32, 13))
-    grid = fig.add_gridspec(2, 3, height_ratios=[3.2, 1.2], hspace=0.08, wspace=0.25)
+    fig = plt.figure(figsize=THREE_PANEL_RATIO_FIGSIZE)
+    resolution_axes = make_centered_two_panel_ratio_axes(fig)
+    ratio_pairs = build_ratio_pairs(model_curves)
 
-    for column_idx, particle in enumerate(PARTICLES):
-        ax = fig.add_subplot(grid[0, column_idx])
-        ratio_ax = fig.add_subplot(grid[1, column_idx], sharex=ax)
+    for (ax, ratio_ax), particle in zip(resolution_axes, RESOLUTION_PARTICLES):
         key = particle["key"]
         all_y = []
         ratio_values_all = []
@@ -1272,14 +1555,13 @@ def plot_resolution_comparison_with_ratio(model_curves, output_path):
         ax.set_ylabel(r"Energy resolution $\sigma/\mu$")
         ax.set_xlim(*particle["xlim"])
         ax.set_xscale("log")
-        ax.set_xticks([x for x in [0.1, 0.3, 1.0, 3.0, 10.0, 30.0] if particle["xlim"][0] <= x <= particle["xlim"][1]])
+        apply_log_energy_ticks(ax, particle["xlim"])
         ax.grid(True, axis="y", alpha=0.25, linestyle="--")
         ax.set_axisbelow(True)
         ax.set_ylim(*get_resolution_ylim(particle["key"], all_y))
-        ax.legend(fontsize=15, title="Geometry / method", title_fontsize=13)
+        ax.legend(fontsize=21, title="Geometry / method", title_fontsize=19)
         plt.setp(ax.get_xticklabels(), visible=False)
 
-        ratio_pairs = build_ratio_pairs(model_curves)
         for method_key, numerator_label, denominator_label in ratio_pairs:
             numerator_curve = model_curves[numerator_label][key]
             denominator_curve = model_curves[denominator_label][key]
@@ -1317,13 +1599,12 @@ def plot_resolution_comparison_with_ratio(model_curves, output_path):
 
         style_resolution_ratio_axis(ratio_ax, particle, "o3_v01 / o2_v05", ratio_values_all)
 
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    save_fixed_canvas(fig, output_path)
 
 
 def main():
     args = parse_args()
+    configure_plot_style()
     os.makedirs(args.output_dir, exist_ok=True)
     summary_dir = os.path.join(args.output_dir, "summary_plots")
     os.makedirs(summary_dir, exist_ok=True)
@@ -1404,7 +1685,7 @@ def main():
         model_eff_curves,
         "fake_energy_fraction",
         "fake_energy_fraction_err",
-        "Fake energy [%]",
+        r"Fake energy [$\%$]",
         os.path.join(summary_dir, "overview_FakeEnergy_comparison.pdf"),
         logy=True,
     )
@@ -1412,7 +1693,7 @@ def main():
         model_eff_curves,
         "fake_energy_fraction",
         "fake_energy_fraction_err",
-        "Fake energy [%]",
+        r"Fake energy [$\%$]",
         os.path.join(summary_dir, "overview_FakeEnergy_comparison_with_ratio.pdf"),
         logy=True,
     )
@@ -1420,7 +1701,12 @@ def main():
         datasets,
         os.path.join(summary_dir, "pid_confusion_matrix_per_energy_comparison.pdf"),
     )
-    plot_event_comparison(datasets, os.path.join(summary_dir, "event_energy_mass_comparison.pdf"))
+    plot_event_comparison(
+        datasets,
+        os.path.join(summary_dir, "event_energy_mass_comparison.pdf"),
+        component_label="Inclusive",
+        bins=np.linspace(0.5, 1.25, 180),
+    )
     for component in EVENT_COMPONENTS:
         plot_event_comparison(
             datasets,
