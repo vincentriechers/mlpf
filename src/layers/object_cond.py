@@ -278,6 +278,12 @@ def calc_LV_Lbeta(
         V_attractive = V_attractive.sum(dim=0)  # K objects
         V_attractive = V_attractive.view(-1) / (N_k.view(-1) + 1e-3)
         L_V_attractive = torch.mean(V_attractive)
+        # consider good tracks only and add a term to bring good tracks close to q_alpha
+        q_track_mask = (g.ndata["hit_type"]==1)*(g.ndata["chi_squared_tracks"]<1)
+        q_track = q_track_mask*q
+        V_attractive = (q_track[is_sig]).unsqueeze(-1) * q_alpha.unsqueeze(0) * norms_att
+        V_attractive = V_attractive.sum(dim=0)  # K objects
+        L_V_attractive_tracks = torch.mean(V_attractive)
     elif loss_type == "hgcalimplementation":
 
         V_attractive = (q[is_sig]).unsqueeze(-1) * q_alpha.unsqueeze(0) * norms_att
@@ -347,7 +353,7 @@ def calc_LV_Lbeta(
         # L_V_attractive = V_attractive.sum()
     
 
-    track_term = True
+    track_term = False
     if track_term:
         # for objects with tracks we can measure how much of the energy of the object is being cluster around the alpha point 
         # currently this only considers hits in the class, so it is trying to avoid over segmentation for tracks where we have information 
@@ -457,6 +463,7 @@ def calc_LV_Lbeta(
          L_V = (
                 L_V_attractive 
                 + L_V_repulsive   
+                +L_V_attractive_tracks
                 
             )
     else:   
@@ -601,7 +608,7 @@ def calc_LV_Lbeta(
             norms_rep,  # 16
             norms_att,  # 17
             L_V_repulsive2,
-            Track_loss
+            0
         )
 
 

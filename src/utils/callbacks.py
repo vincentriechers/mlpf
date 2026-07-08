@@ -14,7 +14,7 @@ def get_callbacks(args):
                 # every_n_epochs=val_every_n_epochs,
                 every_n_train_steps=500,
                 save_top_k=-1,  # <--- this is important!
-                save_weights_only=True,
+                save_weights_only=False,
             )
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
     callbacks = [

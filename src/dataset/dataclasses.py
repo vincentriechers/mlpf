@@ -4,6 +4,14 @@ import torch
 from src.dataset.functions_data import modify_index_link_for_gamma_e
 import numpy as np 
 from src.dataset.utils_hits import CachedIndexList
+import awkward as ak
+
+
+def _ak_to_tensor(a):
+    """Fast awkward Array -> torch tensor: one bulk ak.to_numpy() conversion
+    instead of torch.tensor() iterating element-by-element over an awkward Array
+    (which pays awkward's per-op dispatch/error-context tax per row)."""
+    return torch.from_numpy(np.ascontiguousarray(ak.to_numpy(a)))
 
 
 @dataclass
@@ -39,19 +47,19 @@ class Hits:
     
     @classmethod
     def from_data(cls, output, number_hits, args, number_part):
-        hit_particle_link_hits = torch.tensor(output["ygen_hit"])
+        hit_particle_link_hits = _ak_to_tensor(output["ygen_hit"])
         if len(output["ygen_track"])>0:
-            hit_particle_link_tracks= torch.tensor(output["ygen_track"])
+            hit_particle_link_tracks= _ak_to_tensor(output["ygen_track"])
             hit_particle_link = torch.cat((hit_particle_link_hits, hit_particle_link_tracks), dim=0)
         else:
             hit_particle_link = hit_particle_link_hits
         # hit_particle_link_calomother = torch.cat((hit_particle_link_hits_calomother, hit_particle_link_tracks), dim=0)
         if args.pandora:
             pandora_features = PandoraFeatures()
-            X_pandora = torch.tensor(output["X_pandora"])
-            pfo_link_hits = torch.tensor(output["pfo_calohit"])
+            X_pandora = _ak_to_tensor(output["X_pandora"])
+            pfo_link_hits = _ak_to_tensor(output["pfo_calohit"])
             if len(output["pfo_track"])>0:
-                pfo_link_tracks = torch.tensor(output["pfo_track"])
+                pfo_link_tracks = _ak_to_tensor(output["pfo_track"])
                 pfo_link = torch.cat((pfo_link_hits, pfo_link_tracks), dim=0)
             else:
                 pfo_link = pfo_link_hits
@@ -72,17 +80,20 @@ class Hits:
 
         else:
             pandora_features = None
-        X_hit = torch.tensor(output["X_hit"])
+        X_hit = _ak_to_tensor(output["X_hit"])
         if len(output["X_track"])>0:
-            X_track = torch.tensor(output["X_track"])
+            X_track = _ak_to_tensor(output["X_track"])
         # obtain hit type
         if args.ILD:
             hit_type_feature_hit = X_hit[:,14]+1 #tyep (1,2,3,4 hits)
-            time = torch.cat((X_hit[:,9], X_track[:,5]*0),dim=0).view(-1,1)
-            time_10ps = torch.cat((X_hit[:,10], X_track[:,5]*0),dim=0).view(-1,1)
-            time_50ps = torch.cat((X_hit[:,11], X_track[:,5]*0),dim=0).view(-1,1)
-            time_100ps = torch.cat((X_hit[:,12], X_track[:,5]*0),dim=0).view(-1,1)
-            time_1000ps =torch.cat(( X_hit[:,13], X_track[:,5]*0),dim=0).view(-1,1)
+            # tracks carry no calo timing -> append one zero per track; empty if no tracks
+            # (e.g. gammagamma events have zero tracks, so X_track is unassigned here).
+            track_time = X_track[:,5]*0 if len(output["X_track"])>0 else X_hit[:0,9]
+            time = torch.cat((X_hit[:,9], track_time),dim=0).view(-1,1)
+            time_10ps = torch.cat((X_hit[:,10], track_time),dim=0).view(-1,1)
+            time_50ps = torch.cat((X_hit[:,11], track_time),dim=0).view(-1,1)
+            time_100ps = torch.cat((X_hit[:,12], track_time),dim=0).view(-1,1)
+            time_1000ps =torch.cat(( X_hit[:,13], track_time),dim=0).view(-1,1)
             time_v = [time, time_10ps, time_50ps, time_100ps, time_1000ps]
         else:
             hit_type_feature_hit = X_hit[:,10]+1 #tyep (1,2,3,4 hits)
@@ -130,7 +141,7 @@ class Hits:
         else:
             chi_squared_tracks = p_hits
         
-        if args.ILD:
+        if args.ILD or args.allegro:
             hit_type_one_hot = torch.nn.functional.one_hot(
                 hit_type_feature, num_classes=6
             )
