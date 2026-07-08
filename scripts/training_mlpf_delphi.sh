@@ -27,7 +27,8 @@ RUN_NAME=${RUN_NAME:-delphi_500k_clustering}
 MODEL_PREFIX=${SCRATCH}/models/${RUN_NAME}/
 mkdir -p "${MODEL_PREFIX}"
 
-export WANDB_MODE=offline
+# online W&B (entity as in the fasernu repo; auth via ~/.netrc, visible in the container)
+export WANDB_MODE=online
 export WANDB_DIR=${SCRATCH}/wandb/${RUN_NAME}
 mkdir -p "${WANDB_DIR}"
 
@@ -44,7 +45,7 @@ cd "${REPO}"
 
 # 4991 files x ~100 events; batch 20 x 1 GPU x 24000 steps ~ 480k events/epoch
 apptainer exec --nv -B /srv/beegfs/scratch -B /home \
-    --env WANDB_MODE=offline --env WANDB_DIR="${WANDB_DIR}" \
+    --env WANDB_MODE=online --env WANDB_DIR="${WANDB_DIR}" \
     --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     --env SLURM_CPU_BIND=none \
     "${SIF}" \
@@ -65,8 +66,8 @@ apptainer exec --nv -B /srv/beegfs/scratch -B /home \
     --condensation \
     --log-wandb \
     --wandb-displayname "${RUN_NAME}" \
-    --wandb-projectname mlpf_delphi \
-    --wandb-entity ml4hep \
+    --wandb-projectname mlpf-delphi \
+    --wandb-entity optimal-design \
     --frac_cluster_loss 0 \
     --qmin 3 \
     --use-average-cc-pos 0.98 \
