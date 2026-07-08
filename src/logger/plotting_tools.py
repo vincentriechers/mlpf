@@ -48,12 +48,13 @@ def PlotCoordinates(
             features = torch.sigmoid(graph_i.ndata["beta"])
 
         tidx = graph_i.ndata["particle_number"]
+        # .float(): numpy cannot represent bfloat16 (model outputs under bf16-mixed)
         data = {
-            "X": coords[:, 0].view(-1, 1).detach().cpu().numpy(),
-            "Y": coords[:, 1].view(-1, 1).detach().cpu().numpy(),
-            "Z": coords[:, 2].view(-1, 1).detach().cpu().numpy(),
-            "tIdx": tidx.view(-1, 1).detach().cpu().numpy(),
-            "features": features.view(-1, 1).detach().cpu().numpy(),
+            "X": coords[:, 0].view(-1, 1).detach().float().cpu().numpy(),
+            "Y": coords[:, 1].view(-1, 1).detach().float().cpu().numpy(),
+            "Z": coords[:, 2].view(-1, 1).detach().float().cpu().numpy(),
+            "tIdx": tidx.view(-1, 1).detach().float().cpu().numpy(),
+            "features": features.view(-1, 1).detach().float().cpu().numpy(),
         }
         hoverdict = {}
         # if hoverfeat is not None:
