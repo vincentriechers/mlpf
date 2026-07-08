@@ -93,3 +93,27 @@ datasets/
 # =========================
 .env
 .env.*
+
+# =========================
+# Plot outputs
+# =========================
+*.png
+*.pdf
+*.svg
+*.eps
+
+# =========================
+# BSC snapshot tool backups
+# =========================
+*.bsc_*
+
+# =========================
+# Generated analysis / merge-prep docs
+# =========================
+UPSTREAM_DIFF_REPORT.md
+UPSTREAM_SYNC_CHECKLIST.md
+
+# =========================
+# Personal Obsidian notes
+# =========================
+scripts/scripts_vincent/obsidian_mlpf/
