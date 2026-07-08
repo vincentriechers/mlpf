@@ -8,7 +8,7 @@ from src.layers.inference_oc import (
 )
 from src.layers.inference_oc import hfdb_obtain_labels, clustering_obtain_labels, DPC_custom_CLD
 from src.layers.inference_oc import match_showers
-import torch_cmspepr
+# import torch_cmspepr  # unused here; compiled ext not available in the gatr:v9 container
 from src.layers.inference_oc import remove_bad_tracks_from_cluster_v1
 from src.layers.inference_oc import _fix_labels_for_classes
 class FreezeClustering(BaseFinetuning):

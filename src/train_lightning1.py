@@ -23,7 +23,6 @@ from src.utils.train_utils import (
 from src.utils.load_pretrained_models import (
     load_train_model,
     load_test_model,
-    load_test_model2
 )
 from src.utils.callbacks import (
     get_callbacks,
