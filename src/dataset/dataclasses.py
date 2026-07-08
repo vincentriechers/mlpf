@@ -80,9 +80,16 @@ class Hits:
 
         else:
             pandora_features = None
+        # DELPHI files store positions in cm; the rest of the pipeline assumes mm
+        # (e.g. calculate_distance_to_boundary / make_bad_tracks_noise_tracks constants)
+        delphi = getattr(args, "delphi", False)
         X_hit = _ak_to_tensor(output["X_hit"])
+        if delphi:
+            X_hit[:, 6:9] = X_hit[:, 6:9] * 10.0
         if len(output["X_track"])>0:
             X_track = _ak_to_tensor(output["X_track"])
+            if delphi:
+                X_track[:, 12:15] = X_track[:, 12:15] * 10.0  # referencePoint_calo
         # obtain hit type
         if args.ILD:
             hit_type_feature_hit = X_hit[:,14]+1 #tyep (1,2,3,4 hits)

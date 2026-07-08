@@ -26,6 +26,12 @@ class Particles_GT():
     def fill(self, output, prediction, args):
         
         features_particles = torch.tensor(output["X_gen"])
+        if getattr(args, "delphi", False):
+            # DELPHI stores positions in cm, the pipeline assumes mm; scale the
+            # position columns (vertex 15:18, endpoint 18:21) but NOT 12:15,
+            # which is the momentum vector (|X_gen[:,12:15]| == X_gen[:,11])
+            features_particles = features_particles.clone()
+            features_particles[:, 15:21] = features_particles[:, 15:21] * 10.0
         particle_coord_angle = features_particles[:,4:6]
         particle_coord = features_particles[:, 12:15]
         vertex_coord = features_particles[:, 15:18]
