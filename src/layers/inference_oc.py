@@ -23,7 +23,7 @@ try:
 except ModuleNotFoundError:
     dc = None
 from src.utils.pid_conversion import pid_conversion_dict as _PID_CONV_DICT
-from src.layers.dpc_track_seeded import DPC_track_seeded
+# from src.layers.dpc_track_seeded import DPC_track_seeded  # module absent; only use is commented out below
 
 def compact_labels_preserve_zero(labels):
     """Renumber positive cluster labels to be contiguous starting from 1, keeping label 0
