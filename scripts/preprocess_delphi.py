@@ -78,10 +78,11 @@ def process_file(io_paths):
 
     new_xgen, new_yh, new_yt, new_yc = [], [], [], []
     for ev in range(n_events):
-        xg = ak.to_numpy(arr["X_gen"][ev])
-        yh = ak.to_numpy(arr["ygen_hit"][ev]).astype(np.int64)
-        yt = ak.to_numpy(arr["ygen_track"][ev]).astype(np.int64)
-        yc = ak.to_numpy(arr["ygen_hit_calom"][ev]).astype(np.int64)
+        # empty per-event lists convert to shape (0,) — force the 2D/1D shapes
+        xg = ak.to_numpy(arr["X_gen"][ev]) if len(arr["X_gen"][ev]) else np.zeros((0, 21))
+        yh = ak.to_numpy(arr["ygen_hit"][ev]).astype(np.int64).reshape(-1)
+        yt = ak.to_numpy(arr["ygen_track"][ev]).astype(np.int64).reshape(-1)
+        yc = ak.to_numpy(arr["ygen_hit_calom"][ev]).astype(np.int64).reshape(-1)
         n_gen = len(xg)
 
         keep = np.zeros(n_gen, dtype=bool)
@@ -149,12 +150,12 @@ def verify_file(io_paths):
         xt_b = ak.to_numpy(b["X_track"][ev]) if len(b["X_track"][ev]) else np.zeros((0, 27))
         assert xt_a.shape == xt_b.shape and (xt_a == xt_b).all(), f"{out_path} ev{ev}: X_track changed"
 
-        yh_a = ak.to_numpy(a["ygen_hit"][ev]).astype(np.int64)
-        yh_b = ak.to_numpy(b["ygen_hit"][ev]).astype(np.int64)
+        yh_a = ak.to_numpy(a["ygen_hit"][ev]).astype(np.int64).reshape(-1)
+        yh_b = ak.to_numpy(b["ygen_hit"][ev]).astype(np.int64).reshape(-1)
         assert (yh_a == -1).sum() == (yh_b == -1).sum(), f"{out_path} ev{ev}: -1 count changed"
         # surviving targets keep identical feature rows and labels stay aligned
-        xg_a = ak.to_numpy(a["X_gen"][ev])
-        xg_b = ak.to_numpy(b["X_gen"][ev])
+        xg_a = ak.to_numpy(a["X_gen"][ev]) if len(a["X_gen"][ev]) else np.zeros((0, 21))
+        xg_b = ak.to_numpy(b["X_gen"][ev]) if len(b["X_gen"][ev]) else np.zeros((0, 21))
         lab = yh_b >= 0
         assert (np.abs(xg_b[yh_b[lab], 8] - xg_a[yh_a[lab], 8]) < 1e-12).all(), \
             f"{out_path} ev{ev}: hit->target energy mismatch after remap"

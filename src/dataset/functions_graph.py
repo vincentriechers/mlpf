@@ -24,6 +24,10 @@ def create_inputs_from_table(
 ):
     number_hits = np.int32(len(output["X_track"])+len(output["X_hit"]))
     number_part = np.int32(len(output["X_gen"]))
+    if number_part == 0:
+        # rare events with no gen targets at all (seen in DELPHI): Particles_GT.fill
+        # would crash on the empty X_gen; signal "empty graph" via the len==1 protocol
+        return [None]
 
     hits = Hits.from_data(
     output,
