@@ -28,7 +28,8 @@ cp -n "${SCRATCH}/digitized_filtered/pf_tree_100000.parquet" "${OVERFIT_DIR}/" |
 MODEL_PREFIX=${SCRATCH}/models/overfit_${SLURM_JOB_ID}/
 mkdir -p "${MODEL_PREFIX}"
 
-export WANDB_MODE=offline
+# online W&B (entity as in the fasernu repo; auth via ~/.netrc, visible in the container)
+export WANDB_MODE=online
 export WANDB_DIR=${SCRATCH}/wandb/${SLURM_JOB_ID}
 mkdir -p "${WANDB_DIR}"
 
@@ -39,7 +40,7 @@ nvidia-smi || true
 cd "${REPO}"
 
 apptainer exec --nv -B /srv/beegfs/scratch -B /home \
-    --env WANDB_MODE=offline --env WANDB_DIR="${WANDB_DIR}" \
+    --env WANDB_MODE=online --env WANDB_DIR="${WANDB_DIR}" \
     --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     "${SIF}" \
     python -m src.train_lightning1 \
@@ -59,8 +60,8 @@ apptainer exec --nv -B /srv/beegfs/scratch -B /home \
     --condensation \
     --log-wandb \
     --wandb-displayname delphi_overfit \
-    --wandb-projectname mlpf_delphi \
-    --wandb-entity ml4hep \
+    --wandb-projectname mlpf-delphi \
+    --wandb-entity optimal-design \
     --frac_cluster_loss 0 \
     --qmin 3 \
     --use-average-cc-pos 0.98 \
