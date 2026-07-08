@@ -52,7 +52,7 @@ apptainer exec --nv -B /srv/beegfs/scratch -B /home \
     --gpus 0 \
     --batch-size 10 \
     --start-lr 1e-3 \
-    --num-epochs 100 \
+    --num-epochs "${NUM_EPOCHS:-100}" \
     --optimizer ranger \
     --fetch-by-files \
     --fetch-step 1 \
