@@ -44,6 +44,10 @@ nvidia-smi || true
 cd "${REPO}"
 
 # 4991 files x ~100 events; batch 20 x 1 GPU x 24000 steps ~ 480k events/epoch
+# start-lr: the CLD recipe used 1e-3 at effective batch 80 (20 x 4 GPUs); at
+# single-GPU batch 20 that LR beta-collapsed + NaN'd at ~5k steps (job
+# 10170558), so scale it down linearly with the effective batch (-> 2.5e-4).
+# Override with START_LR=... if needed.
 apptainer exec --nv -B /srv/beegfs/scratch -B /home \
     --env WANDB_MODE=online --env WANDB_DIR="${WANDB_DIR}" \
     --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
@@ -58,7 +62,7 @@ apptainer exec --nv -B /srv/beegfs/scratch -B /home \
     --num-workers 6 \
     --gpus 0 \
     --batch-size 20 \
-    --start-lr 1e-3 \
+    --start-lr "${START_LR:-2.5e-4}" \
     --num-epochs 10 \
     --optimizer ranger \
     --fetch-by-files \
