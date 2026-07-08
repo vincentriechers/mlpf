@@ -4,11 +4,11 @@
 #SBATCH --output=/srv/beegfs/scratch/users/r/riechers/delphi_mlpf/logs/%x-%j.out
 #SBATCH --error=/srv/beegfs/scratch/users/r/riechers/delphi_mlpf/logs/%x-%j.err
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1          # Lightning spawns per-GPU workers
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:4
-#SBATCH --mem=128G
-#SBATCH --time=4-00:00:00
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
+#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH --time=6-00:00:00
 
 # Full DELPHI clustering training: 500k Z->qqbar events (filtered pf_trees).
 # Mirrors scripts/training_mlpf_cld_arc_05.sh (CLD 500k baseline), adapted to
@@ -42,7 +42,7 @@ fi
 nvidia-smi || true
 cd "${REPO}"
 
-# 4991 files x ~100 events; batch 20 x 4 GPUs x 6000 steps ~ 480k events/epoch
+# 4991 files x ~100 events; batch 20 x 1 GPU x 24000 steps ~ 480k events/epoch
 apptainer exec --nv -B /srv/beegfs/scratch -B /home \
     --env WANDB_MODE=offline --env WANDB_DIR="${WANDB_DIR}" \
     --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
@@ -55,7 +55,7 @@ apptainer exec --nv -B /srv/beegfs/scratch -B /home \
     --network-config src/models/wrapper/example_mode_gatr_noise.py \
     --model-prefix "${MODEL_PREFIX}" \
     --num-workers 6 \
-    --gpus 0,1,2,3 \
+    --gpus 0 \
     --batch-size 20 \
     --start-lr 1e-3 \
     --num-epochs 10 \
@@ -72,5 +72,5 @@ apptainer exec --nv -B /srv/beegfs/scratch -B /home \
     --use-average-cc-pos 0.98 \
     --tracks \
     --train-val-split 0.98 \
-    --train-batches 6000 \
+    --train-batches 24000 \
     "${RESUME_ARGS[@]}"
