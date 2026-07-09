@@ -1179,6 +1179,11 @@ def object_condensation_loss2(
     :param clust_loss_only: If True, it will only add the clustering terms to the loss
     :return:
     """
+    # compute the loss in fp32 even under bf16-mixed autocast: bf16 cannot
+    # represent the beta clip value 1-1e-4 (it rounds to 1.0), so
+    # arctanh(clip(sigmoid(beta)))**2 turns inf for beta logits >~8 and the
+    # V terms go NaN, collapsing the beta head
+    pred = pred.float()
     _, S = pred.shape
     if clust_loss_only:
         clust_space_dim = output_dim - 1
