@@ -1169,6 +1169,7 @@ def object_condensation_loss2(
     output_dim=4,
     clust_space_norm="none",
     dis=False,
+    s_B=1.0,
 ):
     """
 
@@ -1243,6 +1244,7 @@ def object_condensation_loss2(
         use_average_cc_pos=use_average_cc_pos,
         loss_type=loss_type,
         dis=dis,
+        s_B=s_B,
     )
 
    
