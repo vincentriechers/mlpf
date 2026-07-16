@@ -418,6 +418,15 @@ parser.add_argument(
 parser.add_argument(
     "--qmin", type=float, default=0.1, help="define qmin for condensation"
 )
+parser.add_argument(
+    "--beta-noise-weight",
+    type=float,
+    default=1.0,
+    help="s_B weight of the noise term in L_beta. The term is summed per event "
+    "and divided by a hardcoded 4 (calibrated at batch size 4), so at batch "
+    "size 20 the default is effectively 5x stronger than calibrated; 0.2 "
+    "restores the calibrated ratio.",
+)
 
 parser.add_argument(
     "--L_attractive_weight",

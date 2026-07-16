@@ -183,6 +183,7 @@ class ExampleWrapper(L.LightningModule):
                 fill_loss_weight=self.args.fill_loss_weight,
                 use_average_cc_pos=self.args.use_average_cc_pos,
                 loss_type=self.args.losstype,
+                s_B=getattr(self.args, "beta_noise_weight", 1.0),
             )
         else:
             losses = {}
