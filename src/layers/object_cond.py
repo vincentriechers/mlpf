@@ -46,6 +46,7 @@ def calc_LV_Lbeta(
     # From here on just parameters
     qmin: float = 0.1,
     s_B: float = 1.0,
+    s_B_track: float = None,  # if set, ABSOLUTE s_B for track nodes (hit_type==1) in the noise term; None = uniform s_B (CLD behaviour)
     noise_cluster_index: int = 0,  # cluster_index entries with this value are noise/noise
     beta_stabilizing="soft_q_scaling",
     huberize_norm_for_V_attractive=False,
@@ -485,12 +486,26 @@ def calc_LV_Lbeta(
 
     n_noise_hits_per_event = scatter_count(batch[is_noise])
     n_noise_hits_per_event[n_noise_hits_per_event == 0] = 1
-    L_beta_noise = (
-        s_B
-        * (
-            (scatter_add(beta[is_noise], batch[is_noise])) / n_noise_hits_per_event
+    if s_B_track is None:
+        L_beta_noise = (
+            s_B
+            * (
+                (scatter_add(beta[is_noise], batch[is_noise])) / n_noise_hits_per_event
+            ).sum()
+        )
+    else:
+        # Per-node-type noise weight (DELPHI, --delphi only): tracks get
+        # s_B_track, everything else s_B.  A track whose object's summed
+        # beta is already saturated by its calo hits receives no positive
+        # beta gradient from L_beta_sig, so a noise-heavy track population
+        # (DELPHI: ~50%) collapses to beta=0 under a uniform s_B within
+        # ~1k steps.
+        w_noise = torch.full_like(beta[is_noise], s_B)
+        w_noise[(g.ndata["hit_type"] == 1)[is_noise]] = s_B_track
+        L_beta_noise = (
+            (scatter_add(w_noise * beta[is_noise], batch[is_noise]))
+            / n_noise_hits_per_event
         ).sum()
-    )
     # print("L_beta_noise", L_beta_noise / batch_size)
     # -------
     # L_beta signal term
@@ -1170,6 +1185,7 @@ def object_condensation_loss2(
     clust_space_norm="none",
     dis=False,
     s_B=1.0,
+    s_B_track=None,
 ):
     """
 
@@ -1245,6 +1261,7 @@ def object_condensation_loss2(
         loss_type=loss_type,
         dis=dis,
         s_B=s_B,
+        s_B_track=s_B_track,
     )
 
    

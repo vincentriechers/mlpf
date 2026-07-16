@@ -427,6 +427,18 @@ parser.add_argument(
     "size 20 the default is effectively 5x stronger than calibrated; 0.2 "
     "restores the calibrated ratio.",
 )
+parser.add_argument(
+    "--beta-noise-weight-track",
+    type=float,
+    default=0.05,
+    help="ABSOLUTE s_B applied to TRACK nodes (hit_type==1) in the L_beta "
+    "noise term, replacing --beta-noise-weight for them. Only active with "
+    "--delphi: DELPHI tracks are ~50%% noise and starved of positive beta "
+    "gradient (the object's summed beta saturates from calo hits alone), so "
+    "the global s_B collapses all track betas to 0 within ~1k steps; the "
+    "2026-07-16 scan shows tracks survive at 0.05 while 0.1/0.2 still "
+    "collapse.",
+)
 
 parser.add_argument(
     "--L_attractive_weight",
