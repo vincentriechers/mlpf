@@ -74,6 +74,7 @@ apptainer exec --nv -B /srv/beegfs/scratch -B /home \
     --wandb-entity optimal-design \
     --frac_cluster_loss 0 \
     --qmin 3 \
+    --beta-noise-weight "${BETA_NOISE_WEIGHT:-1.0}" \
     --use-average-cc-pos 0.98 \
     --tracks \
     --train-val-split 0.98 \
