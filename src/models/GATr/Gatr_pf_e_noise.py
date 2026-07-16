@@ -184,6 +184,13 @@ class ExampleWrapper(L.LightningModule):
                 use_average_cc_pos=self.args.use_average_cc_pos,
                 loss_type=self.args.losstype,
                 s_B=getattr(self.args, "beta_noise_weight", 1.0),
+                # DELPHI only: tracks get their own (softer) noise weight so
+                # labeled-track beta survives -- see --beta-noise-weight-track.
+                s_B_track=(
+                    getattr(self.args, "beta_noise_weight_track", 0.05)
+                    if getattr(self.args, "delphi", False)
+                    else None
+                ),
             )
         else:
             losses = {}
