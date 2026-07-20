@@ -506,14 +506,24 @@ def create_and_store_graph_output(
                     print("Not appending to df_list_pandora")
             total_number_events = total_number_events + 1
 
-    df_batch1 = pd.concat(df_list1)
+    if len(df_list1) == 0:
+        # A batch can yield zero shower rows (e.g. a sparse event at batch
+        # size 1 whose per-event df has <=1 row and is skipped above);
+        # return an empty frame instead of crashing pd.concat with
+        # "No objects to concatenate".  Callers append per-batch frames and
+        # concat at epoch end, where empty frames are harmless.
+        df_batch1 = pd.DataFrame()
+    else:
+        df_batch1 = pd.concat(df_list1)
     if predict and pandora_available:
-        df_batch_pandora = pd.concat(df_list_pandora)
+        df_batch_pandora = (
+            pd.concat(df_list_pandora) if len(df_list_pandora) else pd.DataFrame()
+        )
     else:
         df_batch = []
         df_batch_pandora = []
     #
-    if store:
+    if store and len(df_batch1):
         store_at_batch_end(
             path_save,
             df_batch1,
