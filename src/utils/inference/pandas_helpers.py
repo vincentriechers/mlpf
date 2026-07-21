@@ -57,8 +57,11 @@ def open_mlpf_dataframe(path_mlpf, neutrals_only=False, charged_only=False):
     sd["pid_4_class_true"] = sd["pid"].map(pid_conversion_dict)
     for item in sd.pid.unique():
         if item not in pid_conversion_dict.keys() and not pd.isna(item):
-            print(f"Item {item} not in pid_conversion_dict")
-            raise ValueError
+            # DELPHI truth can contain PIDs absent from the CLD-era dict
+            # (rare daughter-kept oddballs); bucket them as neutral hadrons
+            # instead of killing the whole plot run.
+            print(f"Item {item} not in pid_conversion_dict — mapping to class 2")
+            sd.loc[sd["pid"] == item, "pid_4_class_true"] = 2
     if "pred_pid_matched" in sd.columns:
         sd.loc[sd["pred_pid_matched"] < -1, "pred_pid_matched"] = np.nan
     matched = sd[mask]
