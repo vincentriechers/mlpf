@@ -278,7 +278,9 @@ class EnergyCorrectionWrapper(torch.nn.Module):
             # Predict energy for neutrals using the neural network
             res = self.model(model_x)
         if self.pid_channels > 1:
-            pid_pred = self.PID_head(model_x_pid)
+            # cast at the boundary: under Lightning bf16-mixed autocast the
+            # heads emit bf16; everything downstream expects fp32
+            pid_pred = self.PID_head(model_x_pid).float()
         else:
             pid_pred = None
         if self.fake_score_network:
@@ -294,7 +296,7 @@ class EnergyCorrectionWrapper(torch.nn.Module):
                     pos = (pos / torch.norm(pos, dim=1).unsqueeze(1)).clone()
                 return E, pos, pid_pred, ref_pt_pred, score_pred
             else:
-                E_pred = res[:, 0]
+                E_pred = res[:, 0].float()
                 if torch.sum(torch.isnan(E_pred))>0:
                     print("FOUND NAANANANNANANNA!!!!!!")
                     print("nans in x_global_features", torch.sum(torch.isnan(x_global_features)))   
@@ -320,7 +322,7 @@ class EnergyCorrectionWrapper(torch.nn.Module):
             # if self.use_gatr and not use_full_mv:
             #     p = p_vectors_per_batch
             # return E, p
-            return torch.clamp(res[:, 0], min=0, max=None)
+            return torch.clamp(res[:, 0].float(), min=0, max=None)
     @staticmethod
     def obtain_batch_numbers(g):
         graphs_eval = dgl.unbatch(g)
@@ -646,10 +648,10 @@ class EnergyCorrection():
         if self.args.regress_pos:
             pred_ref_pt = torch.ones_like(pred_pos)
             if len(charged_idx):
-                pred_ref_pt[charged_idx.flatten()] = charged_ref_pt_pred.to(pred_ref_pt.device)
+                pred_ref_pt[charged_idx.flatten()] = charged_ref_pt_pred.to(pred_ref_pt.device).float()
                 pred_pos[charged_idx.flatten()] = charged_positions.float().to(pred_pos.device)
             if len(neutral_idx):
-                pred_ref_pt[neutral_idx.flatten()] = neutral_ref_pt_pred.to(neutral_idx.device)
+                pred_ref_pt[neutral_idx.flatten()] = neutral_ref_pt_pred.to(neutral_idx.device).float()
                 pred_pos[neutral_idx.flatten()] = neutral_positions.to(neutral_idx.device).float()
             pred_energy_corr = {
                 "pred_energy_corr": pred_energy_corr,
