@@ -616,9 +616,9 @@ class EnergyCorrection():
         if self.fake_score_network:
             score_object = pred_pid.clone()
             if len(charged_idx):
-                score_object[charged_idx.flatten()] = charged_score_pred
+                score_object[charged_idx.flatten()] = charged_score_pred.to(score_object.dtype)
             if len(neutral_idx):
-                score_object[neutral_idx.flatten()] = neutral_score_pred
+                score_object[neutral_idx.flatten()] = neutral_score_pred.to(score_object.dtype)
         
 
         if len(self.pids_charged):
@@ -819,8 +819,8 @@ class EnergyCorrection():
             e_cor, pred_pos, pred_ref_pt, extra_features, fakes_labels, charged_PID_pred, neutral_PID_pred = e_cor["pred_energy_corr"], e_cor["pred_pos"], e_cor[
                 "pred_ref_pt"], e_cor["extra_features"], e_cor["fakes_labels"], e_cor["charged_PID_pred"], e_cor["neutral_PID_pred"]
             max_len = max(len(self.pids_charged), len(self.pids_neutral))
-            charged_PID_pred_cpu = charged_PID_pred.detach().cpu()
-            neutral_PID_pred_cpu = neutral_PID_pred.detach().cpu()
+            charged_PID_pred_cpu = charged_PID_pred.detach().float().cpu()
+            neutral_PID_pred_cpu = neutral_PID_pred.detach().float().cpu()
             if charged_PID_pred_cpu.ndim == 1:
                 charged_PID_pred_cpu = charged_PID_pred_cpu.reshape(1, -1)
             if neutral_PID_pred_cpu.ndim == 1:
@@ -842,7 +842,7 @@ class EnergyCorrection():
                 PID_logits[charged_idx.cpu()] = charged_PID_pred_cpu
                 PID_logits[neutral_idx.cpu()] = neutral_PID_pred_cpu
 
-            extra_features = extra_features.detach().cpu()
+            extra_features = extra_features.detach().float().cpu()
             extra_features = torch.cat((extra_features, PID_logits), dim=1).numpy()
 
         else:
