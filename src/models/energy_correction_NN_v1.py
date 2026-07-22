@@ -604,11 +604,14 @@ class EnergyCorrection():
             ec_x[charged_idx.detach().cpu().numpy()] = charged_energies_ec_x[0]
             ec_x[neutral_idx.detach().cpu().numpy()] = neutral_energies_ec_x[0]
         # dummy loss to make it work without complaining about not using params in loss
+        # the GATr EC models can emit bf16 under autocast while
+        # pred_energy_corr is fp32 (crashes index_put on dtype mismatch);
+        # cast to the destination dtype
         pred_energy_corr[charged_idx.flatten()] = (
-            charged_energies #/ sum_e.flatten()[charged_idx.flatten()]
+            charged_energies.to(pred_energy_corr.dtype) #/ sum_e.flatten()[charged_idx.flatten()]
         )
         pred_energy_corr[neutral_idx.flatten()] = (
-            neutral_energies #/ sum_e.flatten()[neutral_idx.flatten()]
+            neutral_energies.to(pred_energy_corr.dtype) #/ sum_e.flatten()[neutral_idx.flatten()]
         )
         if self.fake_score_network:
             score_object = pred_pid.clone()
