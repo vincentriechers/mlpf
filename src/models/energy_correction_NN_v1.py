@@ -623,7 +623,7 @@ class EnergyCorrection():
 
         if len(self.pids_charged):
             if len(charged_idx):
-                charged_PID_pred_for_labels = charged_PID_pred.detach().cpu()
+                charged_PID_pred_for_labels = charged_PID_pred.detach().float().cpu()
                 if charged_PID_pred_for_labels.ndim == 1:
                     charged_PID_pred_for_labels = charged_PID_pred_for_labels.reshape(1, -1)
                 charged_PID_pred1 = np.array(self.pids_charged)[np.argmax(charged_PID_pred_for_labels, axis=1)]  #0,1,2
@@ -633,7 +633,7 @@ class EnergyCorrection():
 
         if len(self.pids_neutral):
             if len(neutral_idx):
-                neutral_PID_pred_for_labels = neutral_PID_pred.detach().cpu()
+                neutral_PID_pred_for_labels = neutral_PID_pred.detach().float().cpu()
                 if neutral_PID_pred_for_labels.ndim == 1:
                     neutral_PID_pred_for_labels = neutral_PID_pred_for_labels.reshape(1, -1)
                 neutral_PID_pred1 = np.array(self.pids_neutral)[np.argmax(neutral_PID_pred_for_labels, axis=1)] #0,1
