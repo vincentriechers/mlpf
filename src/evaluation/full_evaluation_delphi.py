@@ -295,6 +295,103 @@ def plot_resolution_comparison_delphi(model_curves, output_path):
     fe.save_fixed_canvas(fig, output_path)
 
 
+NHITS_BINS = np.array([1, 2, 3, 4, 5, 6, 8, 10, 13, 17, 22, 30, 40, 60, 100,
+                       200, 500], dtype=float)
+
+
+def plot_nhits_diagnostic(frame, output_path, min_n=30):
+    """Clustering-vs-regression diagnostic vs the TRUTH calo-hit count, for
+    truth particles that left >=1 hit.  Top row per class: histogram of truth
+    particles per n_hits bin (left axis, log) with the clustering efficiency
+    overlaid (right axis).  Bottom row: median calibrated_E/true_E with IQR
+    band for the matched showers of the same bins.  A neutral class that is
+    efficient but badly calibrated points at the energy regression; one that
+    is simply not matched at low n_hits points at the clustering."""
+    truth = frame[frame["pid"].notna() & (frame["n_hits"] >= 1)].copy()
+    truth["cls"] = truth["pid"].map(fe.pid_conversion_dict)
+    matched = truth["pred_showers_E"].notna()
+    response = truth["calibrated_E"] / truth["true_showers_E"]
+
+    centers = np.sqrt(NHITS_BINS[:-1] * NHITS_BINS[1:])
+    hist_color, eff_color, resp_color = "#b8b8b8", "#0F4C5C", "#E36414"
+    fig, axes = plt.subplots(
+        2, 3, figsize=(21, 12.5),
+        gridspec_kw={"left": 0.070, "right": 0.94, "bottom": 0.09,
+                     "top": 0.94, "wspace": 0.30, "hspace": 0.28})
+    for col, particle in enumerate(DELPHI_PARTICLES):
+        sel = truth["cls"] == particle["class_id"]
+        nh = truth.loc[sel, "n_hits"].values.astype(float)
+        found = matched[sel].values
+        resp = response[sel].values
+
+        counts, eff, eff_err, med, q25, q75 = ([] for _ in range(6))
+        for lo, hi in zip(NHITS_BINS[:-1], NHITS_BINS[1:]):
+            m = (nh >= lo) & (nh < hi)
+            counts.append(m.sum())
+            if m.sum() >= min_n:
+                p = found[m].mean()
+                eff.append(p)
+                eff_err.append(np.sqrt(p * (1 - p) / m.sum()))
+                r = resp[m & found]
+                r = r[np.isfinite(r)]
+                if len(r) >= min_n:
+                    med.append(np.median(r))
+                    q25.append(np.percentile(r, 25))
+                    q75.append(np.percentile(r, 75))
+                else:
+                    med.append(np.nan), q25.append(np.nan), q75.append(np.nan)
+            else:
+                eff.append(np.nan)
+                eff_err.append(np.nan)
+                med.append(np.nan), q25.append(np.nan), q75.append(np.nan)
+        counts, eff, eff_err = np.array(counts), np.array(eff), np.array(eff_err)
+        med, q25, q75 = np.array(med), np.array(q25), np.array(q75)
+
+        # top: population + clustering efficiency
+        ax = axes[0, col]
+        ax.stairs(counts, NHITS_BINS, fill=True,
+                  color=hist_color, alpha=0.55, label="truth particles")
+        ax.set_yscale("log")
+        ax.set_ylim(bottom=max(0.5, counts[counts > 0].min() * 0.5)
+                    if (counts > 0).any() else 0.5)
+        ax.set_ylabel("Truth particles (≥1 hit)")
+        ax.set_title(particle["label"])
+        ax_eff = ax.twinx()
+        ax_eff.plot(centers, eff, "o-", color=eff_color, markersize=8,
+                    label="clustering efficiency")
+        ax_eff.fill_between(centers, eff - eff_err, eff + eff_err,
+                            color=eff_color, alpha=0.15, linewidth=0)
+        ax_eff.set_ylim(0.0, 1.05)
+        ax_eff.set_ylabel("Clustering efficiency", color=eff_color)
+        ax_eff.tick_params(axis="y", labelcolor=eff_color)
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = ax_eff.get_legend_handles_labels()
+        ax_eff.legend(h1 + h2, l1 + l2, fontsize=16, loc="lower right")
+
+        # bottom: energy response of the matched showers
+        ax = axes[1, col]
+        ax.plot(centers, med, "o-", color=resp_color, markersize=8,
+                label="median calibrated/true")
+        ax.fill_between(centers, q25, q75, color=resp_color, alpha=0.15,
+                        linewidth=0, label="IQR")
+        ax.axhline(1.0, color="black", linewidth=1.2, linestyle="--", alpha=0.6)
+        ax.set_ylabel(r"$E_{\mathrm{calib}} / E_{\mathrm{true}}$ (matched)")
+        fin = np.isfinite(q25) & np.isfinite(q75)
+        if fin.any():
+            lo_y = min(0.75, np.nanmin(q25[fin]) - 0.05)
+            hi_y = max(1.25, np.nanmax(q75[fin]) + 0.05)
+            ax.set_ylim(lo_y, hi_y)
+        ax.legend(fontsize=16, loc="upper right")
+
+        for ax in (axes[0, col], axes[1, col]):
+            ax.set_xscale("log")
+            ax.set_xlim(NHITS_BINS[0], NHITS_BINS[-1])
+            ax.set_xlabel("Truth calo hits per particle")
+            ax.grid(True, axis="x", alpha=0.25, linestyle="--")
+            ax.set_axisbelow(True)
+    fe.save_fixed_canvas(fig, output_path)
+
+
 def plot_confusion_matrix_delphi(frame, output_path):
     """fe.plot_confusion_matrix_grid for a single model: one value per cell
     (full-cell colour fill, big row-normalised %, small count), no quadrant
@@ -442,6 +539,9 @@ def main():
 
     plot_confusion_matrix_delphi(
         frame, os.path.join(summary_dir, "pid_confusion_matrix_per_energy.pdf"))
+
+    plot_nhits_diagnostic(
+        frame, os.path.join(summary_dir, "nhits_efficiency_response.pdf"))
 
     plot_event_comparison_delphi(
         frame, os.path.join(summary_dir, "event_energy_mass_comparison.pdf"),
