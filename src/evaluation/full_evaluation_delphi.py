@@ -295,16 +295,17 @@ def plot_resolution_comparison_delphi(model_curves, output_path):
     fe.save_fixed_canvas(fig, output_path)
 
 
-NHITS_BINS = np.array([1, 2, 3, 4, 5, 6, 8, 10, 13, 17, 22, 30, 40, 60, 100,
-                       200, 500], dtype=float)
+NHITS_BINS = np.array([1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20, 25, 30, 40,
+                       50, 65, 80, 100], dtype=float)
 
 
 def plot_nhits_diagnostic(frame, output_path, min_n=30):
     """Clustering-vs-regression diagnostic vs the TRUTH calo-hit count, for
     truth particles that left >=1 hit.  Top row per class: histogram of truth
     particles per n_hits bin (left axis, log) with the clustering efficiency
-    overlaid (right axis).  Bottom row: median calibrated_E/true_E with IQR
-    band for the matched showers of the same bins.  A neutral class that is
+    overlaid (right axis).  Bottom row: median calibrated_E/true_E with
+    central-68% (16th-84th percentile) error bars for the matched showers of
+    the same bins.  A neutral class that is
     efficient but badly calibrated points at the energy regression; one that
     is simply not matched at low n_hits points at the clustering."""
     truth = frame[frame["pid"].notna() & (frame["n_hits"] >= 1)].copy()
@@ -312,19 +313,22 @@ def plot_nhits_diagnostic(frame, output_path, min_n=30):
     matched = truth["pred_showers_E"].notna()
     response = truth["calibrated_E"] / truth["true_showers_E"]
 
-    centers = np.sqrt(NHITS_BINS[:-1] * NHITS_BINS[1:])
+    centers = 0.5 * (NHITS_BINS[:-1] + NHITS_BINS[1:])
     hist_color, eff_color, resp_color = "#b8b8b8", "#0F4C5C", "#E36414"
     fig, axes = plt.subplots(
-        2, 3, figsize=(21, 12.5),
-        gridspec_kw={"left": 0.070, "right": 0.94, "bottom": 0.09,
-                     "top": 0.94, "wspace": 0.30, "hspace": 0.28})
+        2, 3, figsize=(23, 12.5),
+        gridspec_kw={"left": 0.060, "right": 0.955, "bottom": 0.09,
+                     "top": 0.94, "wspace": 0.44, "hspace": 0.28})
     for col, particle in enumerate(DELPHI_PARTICLES):
         sel = truth["cls"] == particle["class_id"]
+        # linear axis capped at the last bin edge; the tail beyond it is
+        # counted in the last (overflow) bin
         nh = truth.loc[sel, "n_hits"].values.astype(float)
+        nh = np.minimum(nh, NHITS_BINS[-1] - 0.5)
         found = matched[sel].values
         resp = response[sel].values
 
-        counts, eff, eff_err, med, q25, q75 = ([] for _ in range(6))
+        counts, eff, eff_err, med, p16, p84 = ([] for _ in range(6))
         for lo, hi in zip(NHITS_BINS[:-1], NHITS_BINS[1:]):
             m = (nh >= lo) & (nh < hi)
             counts.append(m.sum())
@@ -336,16 +340,16 @@ def plot_nhits_diagnostic(frame, output_path, min_n=30):
                 r = r[np.isfinite(r)]
                 if len(r) >= min_n:
                     med.append(np.median(r))
-                    q25.append(np.percentile(r, 25))
-                    q75.append(np.percentile(r, 75))
+                    p16.append(np.percentile(r, 16))
+                    p84.append(np.percentile(r, 84))
                 else:
-                    med.append(np.nan), q25.append(np.nan), q75.append(np.nan)
+                    med.append(np.nan), p16.append(np.nan), p84.append(np.nan)
             else:
                 eff.append(np.nan)
                 eff_err.append(np.nan)
-                med.append(np.nan), q25.append(np.nan), q75.append(np.nan)
+                med.append(np.nan), p16.append(np.nan), p84.append(np.nan)
         counts, eff, eff_err = np.array(counts), np.array(eff), np.array(eff_err)
-        med, q25, q75 = np.array(med), np.array(q25), np.array(q75)
+        med, p16, p84 = np.array(med), np.array(p16), np.array(p84)
 
         # top: population + clustering efficiency
         ax = axes[0, col]
@@ -368,27 +372,30 @@ def plot_nhits_diagnostic(frame, output_path, min_n=30):
         h2, l2 = ax_eff.get_legend_handles_labels()
         ax_eff.legend(h1 + h2, l1 + l2, fontsize=16, loc="lower right")
 
-        # bottom: energy response of the matched showers
+        # bottom: energy response of the matched showers; bars span the
+        # central 68% (16th-84th percentile), the Gaussian-1sigma equivalent
         ax = axes[1, col]
-        ax.plot(centers, med, "o-", color=resp_color, markersize=8,
-                label="median calibrated/true")
-        ax.fill_between(centers, q25, q75, color=resp_color, alpha=0.15,
-                        linewidth=0, label="IQR")
+        yerr = np.vstack([med - p16, p84 - med])
+        ax.errorbar(centers, med, yerr=np.where(np.isfinite(yerr), yerr, 0),
+                    fmt="o-", color=resp_color, markersize=8, capsize=4,
+                    linewidth=2.2, elinewidth=1.6,
+                    label=r"median $\pm$ q68 (16-84%)")
         ax.axhline(1.0, color="black", linewidth=1.2, linestyle="--", alpha=0.6)
         ax.set_ylabel(r"$E_{\mathrm{calib}} / E_{\mathrm{true}}$ (matched)")
-        fin = np.isfinite(q25) & np.isfinite(q75)
+        fin = np.isfinite(p16) & np.isfinite(p84)
         if fin.any():
-            lo_y = min(0.75, np.nanmin(q25[fin]) - 0.05)
-            hi_y = max(1.25, np.nanmax(q75[fin]) + 0.05)
+            lo_y = min(0.75, np.nanmin(p16[fin]) - 0.05)
+            hi_y = max(1.25, np.nanmax(p84[fin]) + 0.05)
             ax.set_ylim(lo_y, hi_y)
         ax.legend(fontsize=16, loc="upper right")
 
         for ax in (axes[0, col], axes[1, col]):
-            ax.set_xscale("log")
-            ax.set_xlim(NHITS_BINS[0], NHITS_BINS[-1])
-            ax.set_xlabel("Truth calo hits per particle")
+            ax.set_xlim(0, NHITS_BINS[-1])
+            ax.set_xlabel("Truth calo hits / particle")
             ax.grid(True, axis="x", alpha=0.25, linestyle="--")
             ax.set_axisbelow(True)
+    fig.text(0.955, 0.015, f"last bin includes overflow (>{NHITS_BINS[-1]:.0f} hits)",
+             ha="right", va="bottom", fontsize=15, color="0.35")
     fe.save_fixed_canvas(fig, output_path)
 
 
