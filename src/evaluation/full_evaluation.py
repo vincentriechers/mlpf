@@ -973,7 +973,10 @@ def plot_confusion_matrix_grid(datasets, output_path):
     datasets_by_label = {dataset["label"]: dataset for dataset in datasets}
     missing_labels = [label for label, _ in CONFUSION_DATASET_LAYOUT if label not in datasets_by_label]
     if missing_labels:
-        raise ValueError(f"Missing datasets for combined confusion matrix: {missing_labels}")
+        # e.g. DELPHI runs have no Pandora baseline; skip this figure rather
+        # than aborting the remaining comparison plots
+        print(f"Skipping combined confusion matrix, missing datasets: {missing_labels}")
+        return
 
     fig, axes = plt.subplots(
         len(CONFUSION_ENERGY_BINS),
