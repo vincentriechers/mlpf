@@ -303,7 +303,7 @@ def plot_nhits_diagnostic(frame, output_path, min_n=30):
     """Clustering-vs-regression diagnostic vs the TRUTH calo-hit count, for
     truth particles that left >=1 hit.  Top row per class: histogram of truth
     particles per n_hits bin (left axis, log) with the clustering efficiency
-    overlaid (right axis).  Bottom row: median calibrated_E/true_E with
+    and the clustering x correct-4-class-PID efficiency overlaid (right axis).  Bottom row: median calibrated_E/true_E with
     central-68% (16th-84th percentile) error bars for the matched showers of
     the same bins.  A neutral class that is
     efficient but badly calibrated points at the energy regression; one that
@@ -311,6 +311,7 @@ def plot_nhits_diagnostic(frame, output_path, min_n=30):
     truth = frame[frame["pid"].notna() & (frame["n_hits"] >= 1)].copy()
     truth["cls"] = truth["pid"].map(fe.pid_conversion_dict)
     matched = truth["pred_showers_E"].notna()
+    pid_ok = matched & (truth["pred_pid_matched"] == truth["cls"])
     response = truth["calibrated_E"] / truth["true_showers_E"]
 
     centers = 0.5 * (NHITS_BINS[:-1] + NHITS_BINS[1:])
@@ -326,9 +327,11 @@ def plot_nhits_diagnostic(frame, output_path, min_n=30):
         nh = truth.loc[sel, "n_hits"].values.astype(float)
         nh = np.minimum(nh, NHITS_BINS[-1] - 0.5)
         found = matched[sel].values
+        found_pid = pid_ok[sel].values
         resp = response[sel].values
 
-        counts, eff, eff_err, med, p16, p84 = ([] for _ in range(6))
+        counts, eff, eff_err, eff_pid, eff_pid_err, med, p16, p84 = (
+            [] for _ in range(8))
         for lo, hi in zip(NHITS_BINS[:-1], NHITS_BINS[1:]):
             m = (nh >= lo) & (nh < hi)
             counts.append(m.sum())
@@ -336,6 +339,9 @@ def plot_nhits_diagnostic(frame, output_path, min_n=30):
                 p = found[m].mean()
                 eff.append(p)
                 eff_err.append(np.sqrt(p * (1 - p) / m.sum()))
+                q = found_pid[m].mean()
+                eff_pid.append(q)
+                eff_pid_err.append(np.sqrt(q * (1 - q) / m.sum()))
                 r = resp[m & found]
                 r = r[np.isfinite(r)]
                 if len(r) >= min_n:
@@ -347,8 +353,11 @@ def plot_nhits_diagnostic(frame, output_path, min_n=30):
             else:
                 eff.append(np.nan)
                 eff_err.append(np.nan)
+                eff_pid.append(np.nan)
+                eff_pid_err.append(np.nan)
                 med.append(np.nan), p16.append(np.nan), p84.append(np.nan)
         counts, eff, eff_err = np.array(counts), np.array(eff), np.array(eff_err)
+        eff_pid, eff_pid_err = np.array(eff_pid), np.array(eff_pid_err)
         med, p16, p84 = np.array(med), np.array(p16), np.array(p84)
 
         # top: population + clustering efficiency
@@ -365,6 +374,11 @@ def plot_nhits_diagnostic(frame, output_path, min_n=30):
                     label="clustering efficiency")
         ax_eff.fill_between(centers, eff - eff_err, eff + eff_err,
                             color=eff_color, alpha=0.15, linewidth=0)
+        ax_eff.plot(centers, eff_pid, "^--", color="#C7522A", markersize=8,
+                    label="clustering × PID efficiency")
+        ax_eff.fill_between(centers, eff_pid - eff_pid_err,
+                            eff_pid + eff_pid_err,
+                            color="#C7522A", alpha=0.15, linewidth=0)
         ax_eff.set_ylim(0.0, 1.05)
         ax_eff.set_ylabel("Clustering efficiency", color=eff_color)
         ax_eff.tick_params(axis="y", labelcolor=eff_color)
