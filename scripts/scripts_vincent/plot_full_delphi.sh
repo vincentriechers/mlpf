@@ -5,41 +5,44 @@
 #SBATCH --error=/srv/beegfs/scratch/users/r/riechers/delphi_mlpf/logs/%x-%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=16G
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=8G
 #SBATCH --time=01:00:00
 
-# DELPHI-native full-pipeline evaluation plots (clustering + EC + PID) from
-# the eval_full dataframe, via training/plot_full_eval_delphi.py.
+# Full-pipeline evaluation plots (EC + PID) for DELPHI via
+# src.evaluation.full_evaluation_delphi — the ARC/05 comparison plotter
+# adapted to a single DELPHI model: same style, confusion grid, event and
+# resolution plots, but the overlaid curves distinguish target cuts
+# (no cut / CH must have track / >=1,3,5 calo hits) instead of
+# geometry/method, no ratio panels, no Pandora slots, data-driven event
+# windows.  Per-target hit counts come from the evaluated parquets
+# (VAL_DIR) via the sorted-energy event fingerprint.
 #
-# This replaces the earlier port of plot_full_comparison_arc_05.sh
-# (src.evaluation.full_evaluation): that plotter is a CLD o3-vs-o2 detector
-# comparison — duplicate model slots, ratio panels, Pandora baselines and
-# CLD-tuned event-energy windows, none of which apply to a single DELPHI
-# model.  Instead the curves here distinguish target categories (no cut /
-# CH must have track / >=1,3,5 calo hits), with axis windows from the data.
-# Hit counts come from the evaluated parquets (awkward), so this runs in the
-# delphi_converter conda env, not the gatr container.
-#
-# Env overrides: DF, VAL_DIR, OUTPUT_DIR, EVAL_TAG
+# Env overrides: MLPF_1, VAL_DIR, EVAL_TAG, OUTPUT_DIR
 
 set -euo pipefail
 
 SCRATCH=/srv/beegfs/scratch/users/r/riechers/delphi_mlpf
-PY=/home/users/r/riechers/.conda/envs/delphi_converter/bin/python
-# NOT $(dirname BASH_SOURCE): sbatch copies the script to /var/spool/slurmd
-TRAIN_DIR=${TRAIN_DIR:-/home/users/r/riechers/delphi_converter/training}
+SIF=${SCRATCH}/containers/gatr_v9.sif
+REPO=/home/users/r/riechers/mlpf
 
 EVAL_TAG="${EVAL_TAG:-firstlook}"
-DF="${DF:-${SCRATCH}/models/delphi_props_smoketest/showers_df_evaluation/eval_full_delphi_${EVAL_TAG}.pkl0_0_None.pt}"
+MLPF_1="${MLPF_1:-${SCRATCH}/models/delphi_props_smoketest/showers_df_evaluation/eval_full_delphi_${EVAL_TAG}.pkl*.pt}"
 VAL_DIR="${VAL_DIR:-${SCRATCH}/validation_filtered}"
-OUTPUT_DIR="${OUTPUT_DIR:-/home/users/r/riechers/delphi_converter/analysis/plots/full_eval_${EVAL_TAG}_delphi}"
+OUTPUT_DIR="${OUTPUT_DIR:-/home/users/r/riechers/delphi_converter/analysis/plots/full_eval_${EVAL_TAG}}"
+mkdir -p "${OUTPUT_DIR}"
 
-echo "DF     : ${DF}"
+export APPTAINERENV_PYTHONPATH=${SCRATCH}/containers/pyextra
+export APPTAINERENV_MLPF_PLOT_USETEX=0
+cd "${REPO}"
+
+echo "MLPF   : ${MLPF_1}"
 echo "VAL    : ${VAL_DIR}"
 echo "Output : ${OUTPUT_DIR}"
 
-"${PY}" "${TRAIN_DIR}/plot_full_eval_delphi.py" \
-    --df "${DF}" \
+apptainer exec -B /srv/beegfs/scratch -B /home \
+    "${SIF}" \
+    python -m src.evaluation.full_evaluation_delphi \
+    --mlpf "${MLPF_1}" \
     --val-dir "${VAL_DIR}" \
-    --out "${OUTPUT_DIR}"
+    --output-dir "${OUTPUT_DIR}"
