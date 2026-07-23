@@ -36,6 +36,8 @@ import awkward as ak
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Rectangle
 
 import src.evaluation.full_evaluation as fe
 
@@ -108,9 +110,6 @@ def style_metric_axis_delphi(ax, particle, ylabel, metric_key, all_y, logy):
 def apply_fe_patches():
     fe.build_style = build_style_delphi
     fe.comparison_sort_key = comparison_sort_key_delphi
-    fe.CONFUSION_ENERGY_BINS = DELPHI_CONFUSION_ENERGY_BINS
-    fe.CONFUSION_FIGSIZE = (13.5, 9.8 * len(DELPHI_CONFUSION_ENERGY_BINS))
-    fe.CONFUSION_DATASET_LAYOUT = [(DELPHI_LABEL, (0.5, 0.5))]
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +295,67 @@ def plot_resolution_comparison_delphi(model_curves, output_path):
     fe.save_fixed_canvas(fig, output_path)
 
 
+def plot_confusion_matrix_delphi(frame, output_path):
+    """fe.plot_confusion_matrix_grid for a single model: one value per cell
+    (full-cell colour fill, big row-normalised %, small count), no quadrant
+    sub-grid or mini-boxes — those exist to overlay the four CLD datasets."""
+    class_order = fe.CONFUSION_CLASS_ORDER
+    n = len(class_order)
+    x_labels = [fe.CONFUSION_CLASS_NAMES[c] for c in class_order] + ["missed"]
+    y_labels = [fe.CONFUSION_CLASS_NAMES[c] for c in class_order] + ["fake"]
+    fake_row = n
+    color = CUT_STYLES[DELPHI_LABEL]["color"]
+    cmap = LinearSegmentedColormap.from_list("delphi", ["#ffffff", color])
+
+    fig, axes = plt.subplots(
+        len(DELPHI_CONFUSION_ENERGY_BINS), 1,
+        figsize=(13.5, 9.8 * len(DELPHI_CONFUSION_ENERGY_BINS)),
+        gridspec_kw={"left": 0.050, "right": 0.995, "bottom": 0.03,
+                     "top": 0.97, "hspace": 0.24})
+    for ax, (elo, ehi) in zip(np.atleast_1d(axes), DELPHI_CONFUSION_ENERGY_BINS):
+        matrix = fe.compute_confusion_matrix(frame, False, elo, ehi)
+        percent = fe.mixed_percentages(matrix, fake_row, fake_norm="column")
+        n_rows = n_cols = n + 1
+        ax.set_xlim(-1.65, n_cols)
+        ax.set_ylim(n_rows, 0)
+        ax.set_aspect("equal")
+        ax.text(-0.83, -0.22, r"$N_{\mathrm{true}}$", ha="center", va="center",
+                fontsize=29, fontweight="bold")
+        for i in range(n_rows):
+            if i < fake_row:
+                ax.add_patch(Rectangle((-1.60, i), 1.45, 1, facecolor="#fafafa",
+                                       edgecolor="0.45", linewidth=1.2))
+                ax.text(-0.875, i + 0.5, f"{int(matrix[i, :].sum())}",
+                        ha="center", va="center", fontsize=19,
+                        fontweight="bold", color=color)
+            for j in range(n_cols):
+                p = float(np.clip(percent[i, j], 0.0, 100.0))
+                text_color = "black" if p < 62.0 else "white"
+                ax.add_patch(Rectangle(
+                    (j, i), 1, 1,
+                    facecolor=cmap(0.04 + 0.96 * (p / 100.0) ** 1.15),
+                    edgecolor="0.20", linewidth=1.4, alpha=0.9))
+                ax.text(j + 0.5, i + 0.44, f"{int(np.rint(p))}",
+                        ha="center", va="center", fontsize=26,
+                        fontweight="bold", color=text_color)
+                ax.text(j + 0.5, i + 0.78, f"{matrix[i, j]}",
+                        ha="center", va="center", fontsize=12,
+                        color=text_color)
+        ax.hlines(fake_row, xmin=-1.65, xmax=n_cols, linewidth=1.6,
+                  color="black", alpha=0.85)
+        ax.set_xticks(np.arange(n_cols) + 0.5)
+        ax.set_yticks(np.arange(n_rows) + 0.5)
+        ax.set_xticklabels(x_labels, rotation=0, fontsize=30)
+        ax.set_yticklabels(y_labels, rotation=0, fontsize=30)
+        ax.set_xlabel("Predicted", fontsize=33, fontweight="bold")
+        ax.set_ylabel("True", fontsize=33, fontweight="bold")
+        ax.set_title(rf"${elo:g}\,\mathrm{{GeV}} < E < {ehi:g}\,\mathrm{{GeV}}$",
+                     fontsize=37, fontweight="bold")
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+    fe.save_fixed_canvas(fig, output_path)
+
+
 def plot_event_comparison_delphi(frame, output_path, component_label=None,
                                  class_id=None, truth_ids=None, logy=False):
     """fe.plot_event_comparison for a single dataset, with axis windows from
@@ -380,9 +440,8 @@ def main():
         r"Fake energy [$\%$]",
         os.path.join(summary_dir, "overview_FakeEnergy.pdf"), logy=True)
 
-    fe.plot_confusion_matrix_grid(
-        [{"label": DELPHI_LABEL, "frame": frame, "is_pandora": False}],
-        os.path.join(summary_dir, "pid_confusion_matrix_per_energy.pdf"))
+    plot_confusion_matrix_delphi(
+        frame, os.path.join(summary_dir, "pid_confusion_matrix_per_energy.pdf"))
 
     plot_event_comparison_delphi(
         frame, os.path.join(summary_dir, "event_energy_mass_comparison.pdf"),
