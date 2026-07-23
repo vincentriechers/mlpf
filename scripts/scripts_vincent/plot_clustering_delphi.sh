@@ -5,8 +5,8 @@
 #SBATCH --error=/srv/beegfs/scratch/users/r/riechers/delphi_mlpf/logs/%x-%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=12G
 #SBATCH --time=02:00:00
 
 # Clustering performance plots from the matched-showers dataframes written by

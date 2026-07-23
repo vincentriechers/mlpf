@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
-#SBATCH --mem=32G
+#SBATCH --mem=12G
 #SBATCH --time=24:00:00
 
 # Clustering evaluation on the DEDICATED DELPHI validation set (50k events),

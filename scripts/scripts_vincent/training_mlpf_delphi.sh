@@ -5,9 +5,9 @@
 #SBATCH --error=/srv/beegfs/scratch/users/r/riechers/delphi_mlpf/logs/%x-%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=12
+#SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:1
-#SBATCH --mem=32G
+#SBATCH --mem=16G
 #SBATCH --time=6-00:00:00
 
 # Full DELPHI clustering training (copy of mlpf/scripts/training_mlpf_delphi.sh
