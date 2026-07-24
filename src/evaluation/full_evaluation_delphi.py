@@ -518,6 +518,49 @@ def plot_event_comparison_delphi(frame, output_path, component_label=None,
     fe.save_fixed_canvas(fig, output_path)
 
 
+def plot_visible_mass_delphi(frame, output_path):
+    """Absolute visible mass and visible energy per event (truth vs reco),
+    same computation as the M_reco/M_true ratio panels
+    (calculate_event_mass_resolution with ML-PID mass assignment) but drawn
+    in GeV so the Z peak is visible directly."""
+    dic = fe.calculate_event_mass_resolution(
+        frame, False, perfect_pid=False, mass_zero=False, ML_pid=True,
+        fake=False)
+    panels = [
+        (np.asarray(dic["mass_true"]), np.asarray(dic["mass_pred_p"]),
+         r"Visible mass [GeV]", 91.19),
+        (np.asarray(dic["E_true"]), np.asarray(dic["E_pred"]),
+         r"Visible energy [GeV]", 91.19),
+    ]
+    fig, axes = plt.subplots(1, 2, figsize=fe.EVENT_FIGSIZE,
+                             gridspec_kw=fe.EVENT_GRID_KW)
+    for ax, (true_v, pred_v, xlabel, ref) in zip(axes, panels):
+        true_v = true_v[np.isfinite(true_v)]
+        pred_v = pred_v[np.isfinite(pred_v)]
+        lo = min(np.percentile(true_v, 0.5), np.percentile(pred_v, 0.5))
+        hi = max(np.percentile(true_v, 99.5), np.percentile(pred_v, 99.5))
+        pad = 0.05 * (hi - lo)
+        bins = np.linspace(lo - pad, hi + pad, 110)
+        for values, label, color in (
+                (true_v, "truth", "0.35"),
+                (pred_v, DELPHI_LABEL, CUT_STYLES[DELPHI_LABEL]["color"])):
+            stats = fe.summarize_distribution(values)
+            ax.hist(values, bins=bins, histtype="step",
+                    weights=np.ones_like(values) / len(values),
+                    color=color, linewidth=2.4, alpha=0.85,
+                    label=f"{label}\nmed={stats['median']:.1f}, "
+                          f"q68={stats['q68']:.1f} GeV")
+        ax.axvline(ref, color="black", linewidth=1.2, linestyle="--",
+                   alpha=0.6)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Normalized entries")
+        ax.set_xlim(bins[0], bins[-1])
+        ax.grid(True, alpha=0.25, linestyle="--")
+        ax.legend(fontsize=17)
+    fig.suptitle(r"$Z\to q\bar{q}$ visible mass / energy", fontsize=28, y=0.96)
+    fe.save_fixed_canvas(fig, output_path)
+
+
 def main():
     args = parse_args()
     fe.configure_plot_style()
@@ -563,6 +606,9 @@ def main():
 
     plot_nhits_diagnostic(
         frame, os.path.join(summary_dir, "nhits_efficiency_response.pdf"))
+
+    plot_visible_mass_delphi(
+        frame, os.path.join(summary_dir, "visible_mass.pdf"))
 
     plot_event_comparison_delphi(
         frame, os.path.join(summary_dir, "event_energy_mass_comparison.pdf"),
