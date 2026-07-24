@@ -41,7 +41,7 @@ from matplotlib.patches import Rectangle
 
 import src.evaluation.full_evaluation as fe
 
-DELPHI_LABEL = "DELPHI HitPF"
+DELPHI_LABEL = "HitPF"
 KEY_CUTS = ["no cut", "CH must have track", "≥1 hit", "≥3 hits", "≥5 hits"]
 CUT_STYLES = {
     "no cut": {"color": "#0F4C5C", "marker": "o"},
