@@ -1,7 +1,6 @@
 from os import path
 import sys
-# sys.path.append(path.abspath("/mnt/proj3/dd-23-91/cern/geometric-algebra-transformer/"))
-import time 
+import time
 from gatr import GATr, SelfAttentionConfig, MLPConfig
 from gatr.interface import embed_point, extract_scalar, extract_point, embed_scalar
 import torch
@@ -9,23 +8,38 @@ import torch.nn as nn
 from src.logger.plotting_tools import PlotCoordinates
 import numpy as np
 import dgl
-from src.logger.plotting_tools import PlotCoordinates
 from src.layers.object_cond import object_condensation_loss2
 from src.layers.utils_training import obtain_batch_numbers
 from src.models.energy_correction_NN_v1 import EnergyCorrection
 from src.layers.inference_oc import create_and_store_graph_output
 import lightning as L
 from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR
-from xformers.ops.fmha import BlockDiagonalMask
 import os
 import wandb
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from src.utils.nn.tools import log_losses_wandb
 import torch.nn.functional as F
-
+from src.layers.CML_loss import supcon_loss_node_equal
+from xformers.ops.fmha import BlockDiagonalMask
 
 
 class ExampleWrapper(L.LightningModule):
+    """GATr model with memory-efficient local attention.
+
+    Hits within each event are sorted by a 3D Morton (Z-order) curve so that
+    spatially nearby hits are adjacent in the sequence.  A causal sliding window
+    of width k (xformers BlockDiagonalCausalLocalAttentionMask) is then applied,
+    giving O(n·k) attention cost instead of O(n²).  Across GATr's multiple
+    layers information propagates in both directions along the sorted sequence,
+    so the effective receptive field is bidirectional despite the causal window.
+
+    Parameters
+    ----------
+    k : int
+        Local attention window width (number of preceding tokens each token attends to).
+        Should be ≥ the typical number of physical neighbours you care about.
+    """
+
     def __init__(
         self,
         args,
@@ -33,13 +47,13 @@ class ExampleWrapper(L.LightningModule):
         blocks=10,
         hidden_mv_channels=16,
         hidden_s_channels=64,
-        config=None
+        k=64,
+        config=None,
     ):
         super().__init__()
         self.strict_loading = False
         self.input_dim = 3
-        clust_dim = getattr(args, "clustering_space_dim", 3)
-        self.output_dim = clust_dim + 1  # clust_dim coords + 1 beta
+        self.output_dim = 4
         self.loss_final = 0
         self.number_b = 0
         self.df_showers = []
@@ -48,24 +62,21 @@ class ExampleWrapper(L.LightningModule):
         self.args = args
         self.dev = dev
         self.config = config
-        _in_mv = 2 if getattr(args, "uot_labels", False) else 1
+        self.k = k
         self.gatr = GATr(
-            in_mv_channels=_in_mv,
+            in_mv_channels=1,
             out_mv_channels=1,
             hidden_mv_channels=hidden_mv_channels,
             in_s_channels=2,
             out_s_channels=1,
             hidden_s_channels=hidden_s_channels,
             num_blocks=blocks,
-            attention=SelfAttentionConfig(),  # Use default parameters for attention
-            mlp=MLPConfig(),  # Use default parameters for MLP
+            attention=SelfAttentionConfig(),
+            mlp=MLPConfig(),
         )
         self.ScaledGooeyBatchNorm2_1 = nn.BatchNorm1d(self.input_dim, momentum=0.1)
-        if getattr(args, "uot_labels", False):
-            self.ScaledGooeyBatchNorm2_ref = nn.BatchNorm1d(3, momentum=0.1)
         self.clustering = nn.Linear(3, self.output_dim - 1, bias=False)
         self.beta = nn.Linear(2, 1)
-        # Initialize the energy correction module
         if self.args.correction:
             self.energy_correction = EnergyCorrection(self)
             self.ec_model_wrapper_charged = self.energy_correction.model_charged
@@ -82,8 +93,9 @@ class ExampleWrapper(L.LightningModule):
             self._fix_clusters_class.append(2)
         if getattr(self.args, 'fix_photons', False):
             self._fix_clusters_class.append(3)
-    def forward(self, g, y, step_count, eval="", return_train=False,use_gt_clusters=False):
-        tic =time.time()
+
+    def forward(self, g, y, step_count, eval="", return_train=False, use_gt_clusters=False):
+        tic = time.time()
         if not use_gt_clusters:
             inputs = g.ndata["pos_hits_xyz"].float()
             if self.trainer.is_global_zero and step_count % 500 == 0:
@@ -92,30 +104,47 @@ class ExampleWrapper(L.LightningModule):
                     g,
                     path="input_coords",
                     outdir=self.args.model_prefix,
-                    # features_type="ones",
                     predict=self.args.predict,
                     epoch=str(self.current_epoch) + eval,
                     step_count=step_count,
                 )
             inputs_scalar = g.ndata["hit_type"].float().view(-1, 1)
             inputs = self.ScaledGooeyBatchNorm2_1(inputs)
-            embedded_hits = embed_point(inputs) + embed_scalar(inputs_scalar)
-            embedded_inputs = embedded_hits.unsqueeze(-2)   # (N, 1, 16)
+            embedded_inputs = embed_point(inputs) + embed_scalar(inputs_scalar)
+            embedded_inputs = embedded_inputs.unsqueeze(-2)  # (N, 1, 16)
+            scalars = torch.cat(
+                (g.ndata["e_hits"].float(), g.ndata["p_hits"].float()), dim=1
+            )
 
-            if getattr(self.args, "uot_labels", False) and "uot_ref_xyz" in g.ndata:
-                uot_ref = self.ScaledGooeyBatchNorm2_ref(g.ndata["uot_ref_xyz"].float())
-                embedded_ref = embed_point(uot_ref).unsqueeze(-2)  # (N, 1, 16)
-                embedded_inputs = torch.cat([embedded_inputs, embedded_ref], dim=-2)  # (N, 2, 16)
-            mask = self.build_attention_mask(g)
-            scalars = torch.zeros((inputs.shape[0], 1))
-            scalars = torch.cat((g.ndata["e_hits"].float(), g.ndata["p_hits"].float()), dim=1)  
-            # Pass data through GATr
-            embedded_outputs, scalar_outputs = self.gatr(
-                embedded_inputs, scalars=scalars, attention_mask=mask
-            )  # (..., num_points, 1, 16)
+            # Memory-efficient local attention via xformers:
+            #   - Sort hits within each event by 3D Morton code so that
+            #     spatially nearby hits are adjacent in the sequence.
+            #   - BlockDiagonalMask isolates events (no cross-event attention).
+            #   - make_local_attention(k) creates a causal sliding window of
+            #     width k; over multiple GATr layers this gives effective
+            #     bidirectional receptive fields without an O(n²) dense matrix.
+            batch_numbers = obtain_batch_numbers(g)
+            batch_sizes = torch.bincount(batch_numbers.long()).tolist()
+
+            sort_indices = self._morton_sort_indices(inputs, batch_sizes)
+            inv_sort = torch.argsort(sort_indices)
+
+            embedded_inputs_sorted = embedded_inputs[sort_indices]
+            scalars_sorted = scalars[sort_indices]
+
+            valid_sizes = [int(s) for s in batch_sizes if int(s) > 0]
+            mask = BlockDiagonalMask.from_seqlens(valid_sizes).make_local_attention(self.k)
+
+            embedded_outputs_sorted, scalar_outputs_sorted = self.gatr(
+                embedded_inputs_sorted, scalars=scalars_sorted, attention_mask=mask
+            )
+
+            # Restore original node ordering
+            embedded_outputs = embedded_outputs_sorted[inv_sort]
+            scalar_outputs = scalar_outputs_sorted[inv_sort]
+
             points = extract_point(embedded_outputs[:, 0, :])
-            # Extract scalar and aggregate outputs from point cloud
-            nodewise_outputs = extract_scalar(embedded_outputs)  # (..., num_points, 1, 1)
+            nodewise_outputs = extract_scalar(embedded_outputs)  # (N, 1, 1)
             x_point = points
             x_scalar = torch.cat(
                 (nodewise_outputs.view(-1, 1), scalar_outputs.view(-1, 1)), dim=1
@@ -134,29 +163,73 @@ class ExampleWrapper(L.LightningModule):
                     step_count=step_count,
                 )
             x = torch.cat((x_cluster_coord, beta.view(-1, 1)), dim=1)
-            
             pred_energy_corr = torch.ones_like(beta.view(-1, 1)).flatten()
-            toc =time.time()
-            # print("model", toc-tic)
+            toc = time.time()
         else:
-            x = torch.ones_like(g.ndata["h"][:,0:4])
+            x = torch.ones_like(g.ndata["h"][:, 0:4])
         if self.args.correction:
-            with torch.autocast(device_type="cuda", enabled=False):
-                result = self.energy_correction.forward_correction(g, x.float(), y, return_train)
+            result = self.energy_correction.forward_correction(g, x, y, return_train)
             return result
         else:
             pred_energy_corr = torch.ones_like(beta.view(-1, 1))
             return x, pred_energy_corr, 0, 0
 
-    def build_attention_mask(self, g):
-        return BlockDiagonalMask.from_seqlens(g.batch_num_nodes().tolist())
+    def _morton_sort_indices(self, positions, batch_sizes):
+        """Return indices that sort nodes within each event by their 3D Morton code.
+
+        A Morton (Z-order) curve interleaves the bits of quantised x, y, z
+        coordinates, so nearby hits in 3D space map to nearby positions in the
+        1D sorted sequence.  This makes a causal sliding-window attention mask
+        a good approximation of true 3D-KNN attention without materialising an
+        O(n²) dense matrix.
+
+        Parameters
+        ----------
+        positions : torch.Tensor, shape (N, 3)
+            Normalised 3D positions for all nodes (post BatchNorm).
+        batch_sizes : list[int]
+
+        Returns
+        -------
+        sort_indices : torch.LongTensor, shape (N,)
+            Permutation that reorders nodes globally so that within each event
+            nodes are sorted by their Morton code.
+        """
+        device = positions.device
+        # Quantise to 21-bit integers so that 3 coordinates fit in one int64.
+        # Shift from [-~4, ~4] (post-BatchNorm) to [0, 2^21).
+        pos_cpu = positions.detach().cpu()
+        scale = (2 ** 21 - 1) / (pos_cpu.max(0).values - pos_cpu.min(0).values + 1e-6)
+        qpos = ((pos_cpu - pos_cpu.min(0).values) * scale).long().clamp(0, 2 ** 21 - 1)
+
+        def _spread(v):
+            # Spread the bits of a 21-bit integer into every 3rd bit of a 63-bit int.
+            v = v & 0x1FFFFF
+            v = (v | (v << 32)) & 0x1F00000000FFFF
+            v = (v | (v << 16)) & 0x1F0000FF0000FF
+            v = (v | (v << 8))  & 0x100F00F00F00F00F
+            v = (v | (v << 4))  & 0x10C30C30C30C30C3
+            v = (v | (v << 2))  & 0x1249249249249249
+            return v
+
+        morton = _spread(qpos[:, 0]) | (_spread(qpos[:, 1]) << 1) | (_spread(qpos[:, 2]) << 2)
+
+        sort_indices = []
+        offset = 0
+        for size in batch_sizes:
+            size = int(size)
+            if size == 0:
+                continue
+            local_order = torch.argsort(morton[offset: offset + size])
+            sort_indices.append(local_order + offset)
+            offset += size
+        return torch.cat(sort_indices).to(device)
+
     def unfreeze_all(self):
         for p in self.energy_correction.model_charged.parameters():
             p.requires_grad = True
-
         for p in self.energy_correction.model_neutral.gatr_pid.parameters():
             p.requires_grad = True
-
         for p in self.energy_correction.model_neutral.PID_head.parameters():
             p.requires_grad = True
 
@@ -169,10 +242,21 @@ class ExampleWrapper(L.LightningModule):
         else:
             result = self(batch_g, y, 1, use_gt_clusters=use_gt)
 
-        model_output = result[0].float()
-        e_cor = result[1].float()
+        model_output = result[0]
+        e_cor = result[1]
         if not self.args.correction:
-            with torch.autocast(device_type="cuda", enabled=False):
+            CML_loss = False
+            if CML_loss:
+                node_counts = batch_g.batch_num_nodes().tolist()
+                embeddings_split = torch.split(model_output[:, 0:3], node_counts)
+                group_ids_split = torch.split(batch_g.ndata["particle_number"], node_counts)
+                per_event_losses = [
+                    supcon_loss_node_equal(emb, gids)
+                    for emb, gids in zip(embeddings_split, group_ids_split)
+                ]
+                loss = torch.stack(per_event_losses).mean()
+                losses = {}
+            else:
                 (loss, losses,) = object_condensation_loss2(
                     batch_g,
                     model_output,
@@ -188,32 +272,19 @@ class ExampleWrapper(L.LightningModule):
                     fill_loss_weight=self.args.fill_loss_weight,
                     use_average_cc_pos=self.args.use_average_cc_pos,
                     loss_type=self.args.losstype,
-                    output_dim=self.output_dim,
-                    allpair_repulsion_weight=getattr(self.args, "allpair_repulsion_weight", 1.0),
-                    allpair_repulsion_margin=getattr(self.args, "allpair_repulsion_margin", 1.0),
-                    allpair_repulsion_knn=getattr(self.args, "allpair_repulsion_knn", 64),
-                    s_B=getattr(self.args, "beta_noise_weight", 1.0),
-                    # DELPHI only: tracks get their own (softer) noise weight so
-                    # labeled-track beta survives -- see --beta-noise-weight-track.
-                    s_B_track=(
-                        getattr(self.args, "beta_noise_weight_track", 0.05)
-                        if getattr(self.args, "delphi", False)
-                        else None
-                    ),
                 )
         else:
             losses = {}
         if self.args.correction:
             self.energy_correction.global_step = self.global_step
-            if self.current_epoch  ==0:
+            if self.current_epoch == 0:
                 fixed = False
-
             else:
                 fixed = True
-            loss_EC, loss_pos, loss_neutral_pid, loss_charged_pid, loss_score, self.stats= self.energy_correction.get_loss(batch_g, y, result, self.stats,  fixed)
-        
-            loss = loss_EC+loss_neutral_pid + loss_charged_pid 
-            
+            loss_EC, loss_pos, loss_neutral_pid, loss_charged_pid, loss_score, self.stats = self.energy_correction.get_loss(
+                batch_g, y, result, self.stats, fixed
+            )
+            loss = loss_EC + loss_neutral_pid + loss_charged_pid
         else:
             loss_score = 0
         if self.trainer.is_global_zero and not self.args.correction:
@@ -224,8 +295,7 @@ class ExampleWrapper(L.LightningModule):
         del e_cor
         del losses
         return loss
-    
-            
+
     def validation_step(self, batch, batch_idx):
         self.create_paths()
         self.validation_step_outputs = []
@@ -233,14 +303,11 @@ class ExampleWrapper(L.LightningModule):
         batch_g = batch[0]
         shap_vals, ec_x = None, None
         if self.args.correction:
-            tic =time.time()
             result = self(batch_g, y, 1, use_gt_clusters=self.args.use_gt_clusters)
-            toc = time.time()
             model_output = result[0]
             outputs = self.energy_correction.get_validation_step_outputs(batch_g, y, result)
             e_cor1, pred_pos, pred_ref_pt, pred_pid, num_fakes, extra_features, fakes_labels = outputs
             e_cor = e_cor1
-        #################################################################
         else:
             model_output, e_cor1, loss_ll, _ = self(batch_g, y, 1)
             e_cor1 = torch.ones_like(model_output[:, 0].view(-1, 1))
@@ -251,35 +318,10 @@ class ExampleWrapper(L.LightningModule):
             num_fakes = None
             extra_features = None
             fakes_labels = None
-        # commented to be ablt to run with tracks and no hits
-        # (loss, losses,) = object_condensation_loss2(
-        #     batch_g,
-        #     model_output,
-        #     e_cor1,
-        #     y,
-        #     clust_loss_only=True,
-        #     add_energy_loss=False,
-        #     calc_e_frac_loss=False,
-        #     q_min=self.args.qmin,
-        #     frac_clustering_loss=self.args.frac_cluster_loss,
-        #     attr_weight=self.args.L_attractive_weight,
-        #     repul_weight=self.args.L_repulsive_weight,
-        #     fill_loss_weight=self.args.fill_loss_weight,
-        #     use_average_cc_pos=self.args.use_average_cc_pos,
-        #     loss_type=self.args.losstype,
-        # )
- 
-        # if self.trainer.is_global_zero:
-        #     log_losses_wandb(
-        #         True, batch_idx, 0, losses, loss, loss_ll, loss_ec, val=True
-        #     )
         if self.args.explain_ec:
             self.validation_step_outputs.append(
                 [model_output, e_cor, batch_g, y, shap_vals, ec_x, num_fakes]
             )
-        # else:
-        #     if self.args.correction:
-        #         self.validation_step_outputs.append([model_output, e_cor, batch_g, y, num_fakes])
         if self.args.predict:
             if self.args.correction:
                 model_output1 = model_output
@@ -287,7 +329,6 @@ class ExampleWrapper(L.LightningModule):
             else:
                 model_output1 = torch.cat((model_output, e_cor.view(-1, 1)), dim=1)
                 e_corr = None
-            
             (
                 df_batch_pandora,
                 df_batch1,
@@ -306,7 +347,6 @@ class ExampleWrapper(L.LightningModule):
                 tracks=self.args.tracks,
                 shap_vals=shap_vals,
                 ec_x=ec_x,
-                clust_dim=self.output_dim - 1,
                 total_number_events=self.total_number_events,
                 pred_pos=pred_pos,
                 pred_ref_pt=pred_ref_pt,
@@ -319,29 +359,23 @@ class ExampleWrapper(L.LightningModule):
                 extra_features=extra_features,
                 fakes_labels=fakes_labels,
                 pandora_available=self.args.pandora,
-                truth_tracks=self.args.truth_tracking
+                truth_tracks=self.args.truth_tracking,
             )
             self.df_showers_pandora.append(df_batch_pandora)
             self.df_showes_db.append(df_batch1)
-        # del losses
-        # del loss
         del model_output
+
     def create_paths(self):
         cluster_features_path = os.path.join(self.args.model_prefix, "cluster_features")
         show_df_eval_path = os.path.join(
             self.args.model_prefix, "showers_df_evaluation"
         )
-        # if not os.path.exists(show_df_eval_path):
-        #     os.makedirs(show_df_eval_path)
-        # if not os.path.exists(cluster_features_path):
-        #     os.makedirs(cluster_features_path)
         self.show_df_eval_path = show_df_eval_path
+
     def on_train_epoch_end(self):
         self.log("train_loss_epoch", self.loss_final / self.number_b)
 
     def on_train_epoch_start(self):
-        # if self.trainer.is_global_zero and self.current_epoch == 0:
-        #     self.stat_dict = {}
         self.make_mom_zero()
         if self.current_epoch == 0:
             self.stats = {}
@@ -355,7 +389,6 @@ class ExampleWrapper(L.LightningModule):
         self.df_showers = []
         self.df_showers_pandora = []
         self.df_showes_db = []
-
 
     def make_mom_zero(self):
         if self.current_epoch > 1 or self.args.predict:
@@ -374,7 +407,6 @@ class ExampleWrapper(L.LightningModule):
                     )
                     torch.save(shap_vals, path_shap_vals)
                     print("SHAP values saved!")
-                # self.df_showers = pd.concat(self.df_showers)
                 if self.args.pandora:
                     self.df_showers_pandora = pd.concat(self.df_showers_pandora)
                 else:
@@ -383,51 +415,14 @@ class ExampleWrapper(L.LightningModule):
                 store_at_batch_end(
                     path_save=os.path.join(
                         self.args.model_prefix, "showers_df_evaluation"
-                    )+"/"+self.args.name_output,
-                    # df_batch=self.df_showers,
+                    ) + "/" + self.args.name_output,
                     df_batch_pandora=self.df_showers_pandora,
                     df_batch1=self.df_showes_db,
                     step=0,
                     predict=True,
                     store=True,
-                    pandora_available=self.args.pandora
+                    pandora_available=self.args.pandora,
                 )
-            # else:
-            #     model_output = self.validation_step_outputs[0][0]
-            #     e_corr = self.validation_step_outputs[0][1]
-            #     batch_g = self.validation_step_outputs[0][2]
-            #     y = self.validation_step_outputs[0][3]
-            #     shap_vals = None
-            #     ec_x = None
-            #     if self.args.explain_ec:
-            #         shap_vals = self.validation_step_outputs[0][4]
-            #         ec_x = self.validation_step_outputs[0][5]
-            #     if self.args.correction:
-            #         model_output1 = model_output
-            #         e_corr = e_corr
-            #     else:
-            #         model_output1 = torch.cat((model_output, e_corr.view(-1, 1)), dim=1)
-            #         e_corr = None
-            #     create_and_store_graph_output(
-            #         batch_g,
-            #         model_output1,
-            #         y,
-            #         0,
-            #         0,
-            #         0,
-            #         path_save=os.path.join(
-            #             self.args.model_prefix, "showers_df_evaluation"
-            #         ),
-            #         store=True,
-            #         predict=False,
-            #         e_corr=e_corr,
-            #         tracks=self.args.tracks,
-            #         shap_vals=shap_vals,
-            #         ec_x=ec_x,
-            #         use_gt_clusters=self.args.use_gt_clusters,
-            #     )
-            #     del model_output1
-            #     del batch_g
         self.validation_step_outputs = []
         self.df_showers = []
         self.df_showers_pandora = []
@@ -435,36 +430,29 @@ class ExampleWrapper(L.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.args.start_lr)
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        #     optimizer,
-        #     T_max=int(7900*3), # for now for testing
-        #     eta_min=1e-6,
-        # )
-        # scheduler = CosineAnnealingThenFixedScheduler(optimizer,T_max=int(36400), fixed_lr=1e-6 ) #10000
-        # scheduler = WarmupCosineAnnealingThenFixedScheduler(
-        #     optimizer, warmup_steps=2000, T_max=int(36400*2), fixed_lr=1e-5
-        # )
-        scheduler = CosineAnnealingThenFixedScheduler(optimizer, T_max=100000, fixed_lr=1e-6)
+        scheduler = CosineAnnealingThenFixedScheduler(
+            optimizer, T_max=int(36400 * 2), fixed_lr=1e-5
+        )
         self.scheduler = scheduler
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
-                "scheduler": scheduler,  # ReduceLROnPlateau(optimizer, patience=3),
+                "scheduler": scheduler,
                 "interval": "step",
                 "monitor": "train_loss_epoch",
-                "frequency": 1
-            }}
+                "frequency": 1,
+            },
+        }
+
     def lr_scheduler_step(self, scheduler, optimizer_idx, metric=None):
-        # Manually step the scheduler
         scheduler.step()
-   
+
     def correction_training_step(self, e_cor, e_true, neutral_idx):
         if self.args.correction:
             loss_EC_neutrals = torch.nn.L1Loss()(
                 e_cor[neutral_idx], e_true[neutral_idx]
             )
             wandb.log({"loss_EC_neutrals": loss_EC_neutrals})
-
             loss = loss + loss_EC_neutrals
 
 
@@ -476,11 +464,8 @@ def obtain_batch_numbers(g):
         gj = graphs_eval[index]
         num_nodes = gj.number_of_nodes()
         batch_numbers.append(index * torch.ones(num_nodes))
-        num_nodes = gj.number_of_nodes()
     batch = torch.cat(batch_numbers, dim=0)
     return batch
-
-
 
 
 class CosineAnnealingThenFixedScheduler:
@@ -494,12 +479,9 @@ class CosineAnnealingThenFixedScheduler:
     def step(self):
         if self.step_count < self.T_max:
             self.cosine_scheduler.step()
-            # for param_group in self.optimizer.param_groups:
-            #     print("before scheduler change", param_group['lr'])
         else:
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = self.fixed_lr
-                # print("after scheduler change",param_group['lr'])
         self.step_count += 1
 
     def get_last_lr(self):
@@ -507,21 +489,20 @@ class CosineAnnealingThenFixedScheduler:
             return self.cosine_scheduler.get_last_lr()
         else:
             return [self.fixed_lr for _ in self.optimizer.param_groups]
+
     def state_dict(self):
-        # Save the state including current step count and cosine scheduler state
         return {
             "step_count": self.step_count,
-            "cosine_scheduler_state": self.cosine_scheduler.state_dict()
+            "cosine_scheduler_state": self.cosine_scheduler.state_dict(),
         }
 
     def load_state_dict(self, state_dict):
-        # Restore step count and cosine scheduler state
         self.step_count = state_dict["step_count"]
         self.cosine_scheduler.load_state_dict(state_dict["cosine_scheduler_state"])
 
+
 def criterion(ypred, ytrue, step):
-    if True or step < 5000:  # Always use the L1 loss!!
-        #### ! using L1 loss for this training only!
+    if True or step < 5000:
         return F.l1_loss(ypred, ytrue)
     else:
         losses = F.l1_loss(ypred, ytrue, reduction="none") / ytrue.abs()
@@ -533,45 +514,3 @@ def criterion(ypred, ytrue, step):
                 mask = losses > top_percentile
                 losses[mask] = 0.0
         return losses.mean()
-
-
-class WarmupCosineAnnealingThenFixedScheduler:
-    def __init__(self, optimizer, warmup_steps, T_max, fixed_lr):
-        self.warmup_steps = warmup_steps
-        self.base_lrs = [pg['lr'] for pg in optimizer.param_groups]
-        self.cosine_scheduler = CosineAnnealingLR(optimizer, T_max=T_max - warmup_steps, eta_min=fixed_lr)
-        self.fixed_lr = fixed_lr
-        self.T_max = T_max
-        self.step_count = 0
-        self.optimizer = optimizer
-
-    def step(self):
-        if self.step_count < self.warmup_steps:
-            scale = (self.step_count + 1) / self.warmup_steps
-            for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
-                pg['lr'] = base_lr * scale
-        elif self.step_count < self.T_max:
-            self.cosine_scheduler.step()
-        else:
-            for pg in self.optimizer.param_groups:
-                pg['lr'] = self.fixed_lr
-        self.step_count += 1
-
-    def get_last_lr(self):
-        if self.step_count < self.warmup_steps:
-            scale = self.step_count / max(self.warmup_steps, 1)
-            return [base_lr * scale for base_lr in self.base_lrs]
-        elif self.step_count < self.T_max:
-            return self.cosine_scheduler.get_last_lr()
-        else:
-            return [self.fixed_lr for _ in self.optimizer.param_groups]
-
-    def state_dict(self):
-        return {
-            "step_count": self.step_count,
-            "cosine_scheduler_state": self.cosine_scheduler.state_dict()
-        }
-
-    def load_state_dict(self, state_dict):
-        self.step_count = state_dict["step_count"]
-        self.cosine_scheduler.load_state_dict(state_dict["cosine_scheduler_state"])

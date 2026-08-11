@@ -1,3 +1,4 @@
+import os
 
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LinearRegression
@@ -6,7 +7,7 @@ import torch
 from xformers.ops.fmha import BlockDiagonalMask
 import numpy as np
 from src.models.thrust_axis import Thrust, hits_xyz_to_momenta, LR, weighted_least_squares_line
-from torch_scatter import scatter_mean, scatter_sum
+from torch_scatter import scatter_mean, scatter_sum, scatter_min
 
 def pick_lowest_chi_squared(pxpypz, chi_s, batch_idx, xyz_nodes):
     unique_batch = torch.unique(batch_idx)
@@ -183,7 +184,66 @@ class AverageHitsP(torch.nn.Module):
         E_hits = graphs_new.ndata["h"][:, 9] if self.ILD else graphs_new.ndata["h"][:, 8]
         if self.ecal_only:
             hcal_hits = graphs_new.ndata["h"][:, 6] > 0
-            E_hits[mask_ecal_only & (hcal_hits)] = 0
+            if os.environ.get("AVGHITS_HADRONIC_AWARE", "0") == "3":
+                # Faithful Pandora emulation (LCContent + PandoraSDK): neutral-hadron
+                # direction = centroid of the cluster's ENTRY layer. Depth is measured
+                # by projecting hits onto the cluster's own axis (valid in barrel and
+                # endcap, unlike spherical |r|); the entry window is ~one sampling layer;
+                # and the mean is UNWEIGHTED, exactly like Cluster::GetCentroid(layer).
+                # Photon-like clusters keep the all-layer ECAL-only weighted centroid.
+                E_w = E_hits.clone()
+                ecal_hits = graphs_new.ndata["h"][:, 5] > 0
+                E_ecal = scatter_sum(E_w * ecal_hits.float(), batch_idx, dim=0)
+                E_all = scatter_sum(E_w, batch_idx, dim=0)
+                photon_like = (E_ecal / torch.clamp(E_all, min=1e-9)) > 0.9
+                E_photon = E_w.clone()
+                E_photon[mask_ecal_only & (hcal_hits)] = 0
+                cen = scatter_sum(xyz_hits * E_w.unsqueeze(1), batch_idx, dim=0)
+                axis = cen / torch.clamp(torch.norm(cen, dim=1, keepdim=True), min=1e-9)
+                depth = (xyz_hits * axis[batch_idx]).sum(1)
+                dmin = scatter_min(depth, batch_idx, dim=0)[0]
+                delta = float(os.environ.get("AVGHITS_START_DELTA", "0.006"))  # ~20 mm (coords mm/3300)
+                w_entry = ((depth <= (dmin[batch_idx] + delta)) & (E_w > 0)).float()  # UNWEIGHTED
+                E_hits = torch.where(photon_like[batch_idx], E_photon, w_entry)
+                tot = scatter_sum(E_hits, batch_idx, dim=0)
+                if (tot <= 0).any():
+                    E_hits = torch.where((tot <= 0)[batch_idx], E_w, E_hits)
+            elif os.environ.get("AVGHITS_HADRONIC_AWARE", "0") == "2":
+                # Pandora-style pointing for hadronic clusters (LCContent
+                # PfoCreationAlgorithm: neutral hadrons use GetCentroid(innerLayer)):
+                # direction from the SHOWER-START centroid — hits within START_DELTA of
+                # the cluster's minimum radial distance — instead of the full-depth
+                # centroid, which inherits transverse hadronic-shower fluctuations.
+                # Photon-like clusters (ECAL energy fraction > 0.9) keep the standard
+                # all-layer ECAL-only centroid (= Pandora's photon algorithm 2).
+                E_w = E_hits.clone()
+                ecal_hits = graphs_new.ndata["h"][:, 5] > 0
+                E_ecal = scatter_sum(E_w * ecal_hits.float(), batch_idx, dim=0)
+                E_all = scatter_sum(E_w, batch_idx, dim=0)
+                photon_like = (E_ecal / torch.clamp(E_all, min=1e-9)) > 0.9
+                E_photon = E_w.clone()
+                E_photon[mask_ecal_only & hcal_hits] = 0
+                delta = float(os.environ.get("AVGHITS_START_DELTA", "0.012"))  # ~40 mm (coords are mm/3300)
+                r = torch.norm(xyz_hits, dim=1)
+                rmin = scatter_min(r, batch_idx, dim=0)[0]
+                E_start = E_w * (r <= (rmin[batch_idx] + delta)).float()
+                E_hits = torch.where(photon_like[batch_idx], E_photon, E_start)
+                tot = scatter_sum(E_hits, batch_idx, dim=0)
+                if (tot <= 0).any():  # degenerate clusters: fall back to full centroid
+                    E_hits = torch.where((tot <= 0)[batch_idx], E_w, E_hits)
+            elif os.environ.get("AVGHITS_HADRONIC_AWARE", "0") == "1":
+                # keep HCAL hits for hadronic clusters: apply the ECAL-only direction
+                # only where the cluster's ECAL ENERGY fraction is dominant (photon-like).
+                # The default count-based >5% mask reduces low-E neutron clusters to a
+                # handful of ECAL hits and ruins their angular resolution.
+                E_hits = E_hits.clone()  # avoid mutating graph features in place
+                ecal_hits = graphs_new.ndata["h"][:, 5] > 0
+                E_ecal = scatter_sum(E_hits * ecal_hits.float(), batch_idx, dim=0)
+                E_all = scatter_sum(E_hits, batch_idx, dim=0)
+                photon_like = (E_ecal / torch.clamp(E_all, min=1e-9)) > 0.9
+                E_hits[photon_like[batch_idx] & hcal_hits] = 0
+            else:
+                E_hits[mask_ecal_only & (hcal_hits)] = 0
         weighted_avg_hits = scatter_sum(xyz_hits * E_hits.unsqueeze(1), batch_idx, dim=0)
         E_total = scatter_sum(E_hits, batch_idx, dim=0)
         p_direction = weighted_avg_hits / E_total.unsqueeze(1)

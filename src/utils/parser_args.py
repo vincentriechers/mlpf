@@ -665,6 +665,57 @@ parser.add_argument(
 )
 
 parser.add_argument(
+    "--mask3d-use-mask-labels",
+    default=False,
+    action="store_true",
+    help=(
+        "Mask3D + --correction only. When set, the EC pipeline uses the "
+        "Mask3D model's per-(query, hit) argmax labels directly instead of "
+        "running its own DPC clustering on the ECAdapter's synthetic coords. "
+        "Bypasses the redundant clustering step (and the bad-track filter) "
+        "that exists for the GATr-OC pipeline."
+    ),
+)
+
+parser.add_argument(
+    "--eval-mask-threshold",
+    type=float,
+    default=0.5,
+    help=(
+        "Mask3D eval/--predict only. sigmoid(mask) cut for a calo hit to be "
+        "assigned to its argmax query in labels_from_masks (both the "
+        "dataframe-side and EC-side label derivations). Lower → keep more "
+        "low-probability boundary/halo hits → recover under-collected shower "
+        "energy. Sweep this to test whether the Σpred/Σreco completeness "
+        "ceiling vs Pandora is the hard cut or the model. Default 0.5 "
+        "(unchanged behaviour)."
+    ),
+)
+
+parser.add_argument(
+    "--dump-query-frames",
+    type=int,
+    default=0,
+    help=(
+        "Mask3D/IPA eval/--predict only. If > 0, save the per-(matched "
+        "query, shower) frame tensors (points, T, t, gt_mask, target_E, "
+        "particle_axis) for the first N events to "
+        "<model_prefix>/query_frames/, for the offline "
+        "scripts/plot_query_frames.py overlay. 0 = disabled (default)."
+    ),
+)
+
+parser.add_argument(
+    "--eval-track-mask-threshold",
+    type=float,
+    default=0.1,
+    help=(
+        "Mask3D eval/--predict only. Looser sigmoid(mask) cut applied to "
+        "tracker hits in labels_from_masks. Default 0.1 (unchanged)."
+    ),
+)
+
+parser.add_argument(
     "--fix-neutrals",
     default=False,
     action="store_true",

@@ -1,15 +1,66 @@
+"""GATr variant for CLD-geometry symmetries.
+
+CLD is not SO(3)-symmetric: the endcaps break the symmetry in the polar angle θ.
+What survives is:
+  * continuous SO(2) symmetry in the azimuth φ (rotations about the beam axis),
+  * a discrete Z₂ "z-mirror" (z → −z) relating the two endcaps.
+
+GATr is E(3)-equivariant by construction. The standard way to *restrict* this
+to a subgroup is to inject a reference geometric object whose stabilizer in
+E(3) is the target subgroup, as an extra input to the transformer.
+
+Here we inject **one extra node per graph** in the batched sequence, carrying
+ẑ = (0, 0, 1) as a *direction* multivector via `embed_translation`. The
+attention mask is rebuilt with the augmented per-event sizes so each ref node
+only attends within its own event — no cross-event mixing. The ref node is
+discarded before the clustering / β / EC heads run; only the hit-position
+outputs are used downstream.
+
+(Earlier versions of this file injected the reference as an extra mv
+*channel* on each hit node; that is equivalent in symmetry but does not let
+the reference participate in self-attention as a distinct token.)
+
+What this single +ẑ reference buys you:
+  Stabilizer of ẑ in O(3) = O(2)_φ  =  rotations about z  +  reflections in
+  planes containing the z-axis.  This is the SO(2) azimuthal symmetry of the
+  CLD barrel — exactly the continuous symmetry the user expects, and the one
+  that does the heavy lifting (it removes a continuous 1-parameter d.o.f. from
+  full SO(3)).
+
+What this does NOT buy you, and why:
+  The z → −z mirror (Z₂) flips ẑ → −ẑ, so it is *not* in the stabilizer of +ẑ.
+  Adding the antipodal −ẑ as a second mv channel does not fix this either —
+  every embedder in `gatr.interface` (point, translation, oriented_plane, …)
+  is linear / sign-covariant in its argument, so {+ẑ, −ẑ} spans the same
+  features as {+ẑ} plus a constant scalar (which `embed_scalar` already
+  provides). Strict z-mirror equivariance with this stack needs either:
+    (a) a custom Z₂-invariant multivector (e.g. a grade-2 bivector for the
+        *unoriented* xy-plane), constructed by hand outside `gatr.interface`;
+    (b) test-time output symmetrization: average f(x) and z-mirror(f(z-mirror x)).
+  Neither is implemented here; the z-mirror is left as a soft inductive bias
+  carried by the (z-symmetric) training data.
+
+The rest of the module is intentionally identical to `Gatr_pf_e_noise.py`
+so the rest of the pipeline (OC loss, clustering, energy correction head,
+lightning hooks, schedulers) is unchanged.
+"""
+
 from os import path
 import sys
-# sys.path.append(path.abspath("/mnt/proj3/dd-23-91/cern/geometric-algebra-transformer/"))
-import time 
+import time
 from gatr import GATr, SelfAttentionConfig, MLPConfig
-from gatr.interface import embed_point, extract_scalar, extract_point, embed_scalar
+from gatr.interface import (
+    embed_point,
+    extract_scalar,
+    extract_point,
+    embed_scalar,
+    embed_translation,
+)
 import torch
 import torch.nn as nn
 from src.logger.plotting_tools import PlotCoordinates
 import numpy as np
 import dgl
-from src.logger.plotting_tools import PlotCoordinates
 from src.layers.object_cond import object_condensation_loss2
 from src.layers.utils_training import obtain_batch_numbers
 from src.models.energy_correction_NN_v1 import EnergyCorrection
@@ -22,7 +73,7 @@ import wandb
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from src.utils.nn.tools import log_losses_wandb
 import torch.nn.functional as F
-
+from src.layers.CML_loss import supcon_loss_node_equal
 
 
 class ExampleWrapper(L.LightningModule):
@@ -33,7 +84,7 @@ class ExampleWrapper(L.LightningModule):
         blocks=10,
         hidden_mv_channels=16,
         hidden_s_channels=64,
-        config=None
+        config=None,
     ):
         super().__init__()
         self.strict_loading = False
@@ -48,7 +99,21 @@ class ExampleWrapper(L.LightningModule):
         self.args = args
         self.dev = dev
         self.config = config
-        _in_mv = 2 if getattr(args, "uot_labels", False) else 1
+
+        # --- CLD-symmetry: per-event beam-axis reference NODE ---------------------------
+        # ẑ = (0,0,1), registered as a (non-trainable) buffer. At forward time we splice
+        # one ref node per event into the batched sequence (carrying embed_translation(ẑ)
+        # in channel 0) and rebuild the attention mask so each ref node only attends
+        # within its own event — no cross-event mixing. Discarded before clustering/β.
+        # In_mv channel count is therefore the SAME as the base model — ref is a node,
+        # not a channel.
+        self.register_buffer(
+            "cld_z_ref", torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32)
+        )  # (1, 3)
+        # ---------------------------------------------------------------------------------
+
+        _in_mv_uot = 1 if getattr(args, "uot_labels", False) else 0
+        _in_mv = 1 + _in_mv_uot  # hit + (optional) uot ref channel — CLD ref is a NODE
         self.gatr = GATr(
             in_mv_channels=_in_mv,
             out_mv_channels=1,
@@ -57,8 +122,8 @@ class ExampleWrapper(L.LightningModule):
             out_s_channels=1,
             hidden_s_channels=hidden_s_channels,
             num_blocks=blocks,
-            attention=SelfAttentionConfig(),  # Use default parameters for attention
-            mlp=MLPConfig(),  # Use default parameters for MLP
+            attention=SelfAttentionConfig(),
+            mlp=MLPConfig(),
         )
         self.ScaledGooeyBatchNorm2_1 = nn.BatchNorm1d(self.input_dim, momentum=0.1)
         if getattr(args, "uot_labels", False):
@@ -76,14 +141,75 @@ class ExampleWrapper(L.LightningModule):
             self.pids_neutral = []
             self.pids_charged = []
         self._fix_clusters_class = []
-        if getattr(self.args, 'fix_ch', False):
+        if getattr(self.args, "fix_ch", False):
             self._fix_clusters_class.append(1)
-        if getattr(self.args, 'fix_neutrals', False):
+        if getattr(self.args, "fix_neutrals", False):
             self._fix_clusters_class.append(2)
-        if getattr(self.args, 'fix_photons', False):
+        if getattr(self.args, "fix_photons", False):
             self._fix_clusters_class.append(3)
-    def forward(self, g, y, step_count, eval="", return_train=False,use_gt_clusters=False):
-        tic =time.time()
+
+    def _splice_cld_ref_nodes(self, embedded_inputs, scalars, hit_counts):
+        """Splice one ẑ-reference node per event into the batched sequence.
+
+        For each event i with `hit_counts[i]` hits, we insert *one* extra node carrying
+        `embed_translation(ẑ)` in mv channel 0 (other channels and scalars are 0). The
+        ref node is placed at the END of the event's block, so the per-event block
+        layout is  [hit_0, hit_1, ..., hit_{n_i-1}, ref_i].
+
+        Parameters
+        ----------
+        embedded_inputs : (N_hits, n_in_mv, 16)
+        scalars         : (N_hits, n_in_s)
+        hit_counts      : (n_graphs,) int — number of hits per event in the batch
+
+        Returns
+        -------
+        new_embedded_inputs : (N_hits + n_graphs, n_in_mv, 16)
+        new_scalars         : (N_hits + n_graphs, n_in_s)
+        new_counts          : (n_graphs,) — hit_counts + 1, used to rebuild the mask
+        hit_pos             : (N_hits,) long — index of each original hit in the new
+                              sequence, for slicing the GATr output back to hits-only
+        """
+        device = embedded_inputs.device
+        hit_counts = hit_counts.to(device=device, dtype=torch.long)
+        n_graphs = hit_counts.shape[0]
+        N_hits = embedded_inputs.shape[0]
+        new_counts = hit_counts + 1
+        N_new = int(new_counts.sum().item())
+
+        # For each hit k in event i, its new position is k + i (events before it each
+        # contribute one extra ref slot ahead). Ref position for event i is the last
+        # slot of its block.
+        event_of_hit = torch.repeat_interleave(
+            torch.arange(n_graphs, device=device), hit_counts
+        )
+        hit_pos = torch.arange(N_hits, device=device) + event_of_hit  # (N_hits,)
+        new_offsets = torch.cat(
+            [torch.zeros(1, dtype=torch.long, device=device), new_counts.cumsum(0)]
+        )
+        ref_pos = new_offsets[1:] - 1  # (n_graphs,)
+
+        # Allocate and scatter
+        new_embedded_inputs = torch.zeros(
+            N_new, embedded_inputs.shape[1], embedded_inputs.shape[2],
+            dtype=embedded_inputs.dtype, device=device,
+        )
+        new_embedded_inputs[hit_pos] = embedded_inputs
+
+        # Ref nodes: channel 0 carries embed_translation(ẑ); other mv channels / scalars stay 0.
+        ref_z = self.cld_z_ref.expand(n_graphs, -1)        # (n_graphs, 3)
+        embedded_z = embed_translation(ref_z)              # (n_graphs, 16)
+        new_embedded_inputs[ref_pos, 0, :] = embedded_z
+
+        new_scalars = torch.zeros(
+            N_new, scalars.shape[1], dtype=scalars.dtype, device=device
+        )
+        new_scalars[hit_pos] = scalars
+
+        return new_embedded_inputs, new_scalars, new_counts, hit_pos
+
+    def forward(self, g, y, step_count, eval="", return_train=False, use_gt_clusters=False):
+        tic = time.time()
         if not use_gt_clusters:
             inputs = g.ndata["pos_hits_xyz"].float()
             if self.trainer.is_global_zero and step_count % 500 == 0:
@@ -92,7 +218,6 @@ class ExampleWrapper(L.LightningModule):
                     g,
                     path="input_coords",
                     outdir=self.args.model_prefix,
-                    # features_type="ones",
                     predict=self.args.predict,
                     epoch=str(self.current_epoch) + eval,
                     step_count=step_count,
@@ -100,22 +225,40 @@ class ExampleWrapper(L.LightningModule):
             inputs_scalar = g.ndata["hit_type"].float().view(-1, 1)
             inputs = self.ScaledGooeyBatchNorm2_1(inputs)
             embedded_hits = embed_point(inputs) + embed_scalar(inputs_scalar)
-            embedded_inputs = embedded_hits.unsqueeze(-2)   # (N, 1, 16)
+            embedded_inputs = embedded_hits.unsqueeze(-2)  # (N_hits, 1, 16)
 
             if getattr(self.args, "uot_labels", False) and "uot_ref_xyz" in g.ndata:
                 uot_ref = self.ScaledGooeyBatchNorm2_ref(g.ndata["uot_ref_xyz"].float())
-                embedded_ref = embed_point(uot_ref).unsqueeze(-2)  # (N, 1, 16)
-                embedded_inputs = torch.cat([embedded_inputs, embedded_ref], dim=-2)  # (N, 2, 16)
-            mask = self.build_attention_mask(g)
-            scalars = torch.zeros((inputs.shape[0], 1))
-            scalars = torch.cat((g.ndata["e_hits"].float(), g.ndata["p_hits"].float()), dim=1)  
-            # Pass data through GATr
+                embedded_ref = embed_point(uot_ref).unsqueeze(-2)  # (N_hits, 1, 16)
+                embedded_inputs = torch.cat([embedded_inputs, embedded_ref], dim=-2)
+
+            scalars = torch.cat(
+                (g.ndata["e_hits"].float(), g.ndata["p_hits"].float()), dim=1
+            )
+
+            # --- CLD: splice one ẑ-reference node per event into the batched sequence ---
+            # `new_counts = batch_num_nodes + 1` drives the BlockDiagonal attention mask
+            # so each ref node attends only within its own event. Ref nodes' GATr outputs
+            # are dropped before the clustering / β heads run; `hit_pos` restores the
+            # original per-hit ordering and length expected downstream.
+            hit_counts = g.batch_num_nodes()
+            embedded_inputs, scalars, new_counts, hit_pos = self._splice_cld_ref_nodes(
+                embedded_inputs, scalars, hit_counts
+            )
+            mask = BlockDiagonalMask.from_seqlens(new_counts.tolist())
+            # ----------------------------------------------------------------------------
+
+            # Pass augmented sequence through GATr
             embedded_outputs, scalar_outputs = self.gatr(
                 embedded_inputs, scalars=scalars, attention_mask=mask
-            )  # (..., num_points, 1, 16)
+            )  # (N_hits + n_graphs, 1, 16) and (N_hits + n_graphs, 1)
+
+            # Drop the per-event ref nodes — heads see only hit-position outputs.
+            embedded_outputs = embedded_outputs[hit_pos]   # (N_hits, 1, 16)
+            scalar_outputs = scalar_outputs[hit_pos]        # (N_hits, 1)
+
             points = extract_point(embedded_outputs[:, 0, :])
-            # Extract scalar and aggregate outputs from point cloud
-            nodewise_outputs = extract_scalar(embedded_outputs)  # (..., num_points, 1, 1)
+            nodewise_outputs = extract_scalar(embedded_outputs)  # (N_hits, 1, 1)
             x_point = points
             x_scalar = torch.cat(
                 (nodewise_outputs.view(-1, 1), scalar_outputs.view(-1, 1)), dim=1
@@ -134,12 +277,11 @@ class ExampleWrapper(L.LightningModule):
                     step_count=step_count,
                 )
             x = torch.cat((x_cluster_coord, beta.view(-1, 1)), dim=1)
-            
+
             pred_energy_corr = torch.ones_like(beta.view(-1, 1)).flatten()
-            toc =time.time()
-            # print("model", toc-tic)
+            toc = time.time()
         else:
-            x = torch.ones_like(g.ndata["h"][:,0:4])
+            x = torch.ones_like(g.ndata["h"][:, 0:4])
         if self.args.correction:
             with torch.autocast(device_type="cuda", enabled=False):
                 result = self.energy_correction.forward_correction(g, x.float(), y, return_train)
@@ -150,13 +292,12 @@ class ExampleWrapper(L.LightningModule):
 
     def build_attention_mask(self, g):
         return BlockDiagonalMask.from_seqlens(g.batch_num_nodes().tolist())
+
     def unfreeze_all(self):
         for p in self.energy_correction.model_charged.parameters():
             p.requires_grad = True
-
         for p in self.energy_correction.model_neutral.gatr_pid.parameters():
             p.requires_grad = True
-
         for p in self.energy_correction.model_neutral.PID_head.parameters():
             p.requires_grad = True
 
@@ -172,48 +313,48 @@ class ExampleWrapper(L.LightningModule):
         model_output = result[0].float()
         e_cor = result[1].float()
         if not self.args.correction:
-            with torch.autocast(device_type="cuda", enabled=False):
-                (loss, losses,) = object_condensation_loss2(
-                    batch_g,
-                    model_output,
-                    e_cor,
-                    y,
-                    clust_loss_only=True,
-                    add_energy_loss=False,
-                    calc_e_frac_loss=False,
-                    q_min=self.args.qmin,
-                    frac_clustering_loss=self.args.frac_cluster_loss,
-                    attr_weight=self.args.L_attractive_weight,
-                    repul_weight=self.args.L_repulsive_weight,
-                    fill_loss_weight=self.args.fill_loss_weight,
-                    use_average_cc_pos=self.args.use_average_cc_pos,
-                    loss_type=self.args.losstype,
-                    output_dim=self.output_dim,
-                    allpair_repulsion_weight=getattr(self.args, "allpair_repulsion_weight", 1.0),
-                    allpair_repulsion_margin=getattr(self.args, "allpair_repulsion_margin", 1.0),
-                    allpair_repulsion_knn=getattr(self.args, "allpair_repulsion_knn", 64),
-                    s_B=getattr(self.args, "beta_noise_weight", 1.0),
-                    # DELPHI only: tracks get their own (softer) noise weight so
-                    # labeled-track beta survives -- see --beta-noise-weight-track.
-                    s_B_track=(
-                        getattr(self.args, "beta_noise_weight_track", 0.05)
-                        if getattr(self.args, "delphi", False)
-                        else None
-                    ),
-                )
+            CML_loss = False
+            if CML_loss:
+                node_counts = batch_g.batch_num_nodes().tolist()
+                embeddings_split = torch.split(model_output[:, 0:self.output_dim - 1], node_counts)
+                group_ids_split = torch.split(batch_g.ndata["particle_number"], node_counts)
+                per_event_losses = [
+                    supcon_loss_node_equal(emb, gids)
+                    for emb, gids in zip(embeddings_split, group_ids_split)
+                ]
+                loss = torch.stack(per_event_losses).mean()
+                losses = {}
+            else:
+                with torch.autocast(device_type="cuda", enabled=False):
+                    (loss, losses,) = object_condensation_loss2(
+                        batch_g,
+                        model_output,
+                        e_cor,
+                        y,
+                        clust_loss_only=True,
+                        add_energy_loss=False,
+                        calc_e_frac_loss=False,
+                        q_min=self.args.qmin,
+                        frac_clustering_loss=self.args.frac_cluster_loss,
+                        attr_weight=self.args.L_attractive_weight,
+                        repul_weight=self.args.L_repulsive_weight,
+                        fill_loss_weight=self.args.fill_loss_weight,
+                        use_average_cc_pos=self.args.use_average_cc_pos,
+                        loss_type=self.args.losstype,
+                        output_dim=self.output_dim,
+                    )
         else:
             losses = {}
         if self.args.correction:
             self.energy_correction.global_step = self.global_step
-            if self.current_epoch  ==0:
+            if self.current_epoch == 0:
                 fixed = False
-
             else:
                 fixed = True
-            loss_EC, loss_pos, loss_neutral_pid, loss_charged_pid, loss_score, self.stats= self.energy_correction.get_loss(batch_g, y, result, self.stats,  fixed)
-        
-            loss = loss_EC+loss_neutral_pid + loss_charged_pid 
-            
+            loss_EC, loss_pos, loss_neutral_pid, loss_charged_pid, loss_score, self.stats = self.energy_correction.get_loss(
+                batch_g, y, result, self.stats, fixed
+            )
+            loss = loss_EC + loss_neutral_pid + loss_charged_pid
         else:
             loss_score = 0
         if self.trainer.is_global_zero and not self.args.correction:
@@ -224,8 +365,7 @@ class ExampleWrapper(L.LightningModule):
         del e_cor
         del losses
         return loss
-    
-            
+
     def validation_step(self, batch, batch_idx):
         self.create_paths()
         self.validation_step_outputs = []
@@ -233,14 +373,11 @@ class ExampleWrapper(L.LightningModule):
         batch_g = batch[0]
         shap_vals, ec_x = None, None
         if self.args.correction:
-            tic =time.time()
             result = self(batch_g, y, 1, use_gt_clusters=self.args.use_gt_clusters)
-            toc = time.time()
             model_output = result[0]
             outputs = self.energy_correction.get_validation_step_outputs(batch_g, y, result)
             e_cor1, pred_pos, pred_ref_pt, pred_pid, num_fakes, extra_features, fakes_labels = outputs
             e_cor = e_cor1
-        #################################################################
         else:
             model_output, e_cor1, loss_ll, _ = self(batch_g, y, 1)
             e_cor1 = torch.ones_like(model_output[:, 0].view(-1, 1))
@@ -251,35 +388,10 @@ class ExampleWrapper(L.LightningModule):
             num_fakes = None
             extra_features = None
             fakes_labels = None
-        # commented to be ablt to run with tracks and no hits
-        # (loss, losses,) = object_condensation_loss2(
-        #     batch_g,
-        #     model_output,
-        #     e_cor1,
-        #     y,
-        #     clust_loss_only=True,
-        #     add_energy_loss=False,
-        #     calc_e_frac_loss=False,
-        #     q_min=self.args.qmin,
-        #     frac_clustering_loss=self.args.frac_cluster_loss,
-        #     attr_weight=self.args.L_attractive_weight,
-        #     repul_weight=self.args.L_repulsive_weight,
-        #     fill_loss_weight=self.args.fill_loss_weight,
-        #     use_average_cc_pos=self.args.use_average_cc_pos,
-        #     loss_type=self.args.losstype,
-        # )
- 
-        # if self.trainer.is_global_zero:
-        #     log_losses_wandb(
-        #         True, batch_idx, 0, losses, loss, loss_ll, loss_ec, val=True
-        #     )
         if self.args.explain_ec:
             self.validation_step_outputs.append(
                 [model_output, e_cor, batch_g, y, shap_vals, ec_x, num_fakes]
             )
-        # else:
-        #     if self.args.correction:
-        #         self.validation_step_outputs.append([model_output, e_cor, batch_g, y, num_fakes])
         if self.args.predict:
             if self.args.correction:
                 model_output1 = model_output
@@ -287,7 +399,7 @@ class ExampleWrapper(L.LightningModule):
             else:
                 model_output1 = torch.cat((model_output, e_cor.view(-1, 1)), dim=1)
                 e_corr = None
-            
+
             (
                 df_batch_pandora,
                 df_batch1,
@@ -319,29 +431,22 @@ class ExampleWrapper(L.LightningModule):
                 extra_features=extra_features,
                 fakes_labels=fakes_labels,
                 pandora_available=self.args.pandora,
-                truth_tracks=self.args.truth_tracking
+                truth_tracks=self.args.truth_tracking,
             )
             self.df_showers_pandora.append(df_batch_pandora)
             self.df_showes_db.append(df_batch1)
-        # del losses
-        # del loss
         del model_output
+
     def create_paths(self):
-        cluster_features_path = os.path.join(self.args.model_prefix, "cluster_features")
         show_df_eval_path = os.path.join(
             self.args.model_prefix, "showers_df_evaluation"
         )
-        # if not os.path.exists(show_df_eval_path):
-        #     os.makedirs(show_df_eval_path)
-        # if not os.path.exists(cluster_features_path):
-        #     os.makedirs(cluster_features_path)
         self.show_df_eval_path = show_df_eval_path
+
     def on_train_epoch_end(self):
         self.log("train_loss_epoch", self.loss_final / self.number_b)
 
     def on_train_epoch_start(self):
-        # if self.trainer.is_global_zero and self.current_epoch == 0:
-        #     self.stat_dict = {}
         self.make_mom_zero()
         if self.current_epoch == 0:
             self.stats = {}
@@ -355,7 +460,6 @@ class ExampleWrapper(L.LightningModule):
         self.df_showers = []
         self.df_showers_pandora = []
         self.df_showes_db = []
-
 
     def make_mom_zero(self):
         if self.current_epoch > 1 or self.args.predict:
@@ -374,7 +478,6 @@ class ExampleWrapper(L.LightningModule):
                     )
                     torch.save(shap_vals, path_shap_vals)
                     print("SHAP values saved!")
-                # self.df_showers = pd.concat(self.df_showers)
                 if self.args.pandora:
                     self.df_showers_pandora = pd.concat(self.df_showers_pandora)
                 else:
@@ -383,51 +486,14 @@ class ExampleWrapper(L.LightningModule):
                 store_at_batch_end(
                     path_save=os.path.join(
                         self.args.model_prefix, "showers_df_evaluation"
-                    )+"/"+self.args.name_output,
-                    # df_batch=self.df_showers,
+                    ) + "/" + self.args.name_output,
                     df_batch_pandora=self.df_showers_pandora,
                     df_batch1=self.df_showes_db,
                     step=0,
                     predict=True,
                     store=True,
-                    pandora_available=self.args.pandora
+                    pandora_available=self.args.pandora,
                 )
-            # else:
-            #     model_output = self.validation_step_outputs[0][0]
-            #     e_corr = self.validation_step_outputs[0][1]
-            #     batch_g = self.validation_step_outputs[0][2]
-            #     y = self.validation_step_outputs[0][3]
-            #     shap_vals = None
-            #     ec_x = None
-            #     if self.args.explain_ec:
-            #         shap_vals = self.validation_step_outputs[0][4]
-            #         ec_x = self.validation_step_outputs[0][5]
-            #     if self.args.correction:
-            #         model_output1 = model_output
-            #         e_corr = e_corr
-            #     else:
-            #         model_output1 = torch.cat((model_output, e_corr.view(-1, 1)), dim=1)
-            #         e_corr = None
-            #     create_and_store_graph_output(
-            #         batch_g,
-            #         model_output1,
-            #         y,
-            #         0,
-            #         0,
-            #         0,
-            #         path_save=os.path.join(
-            #             self.args.model_prefix, "showers_df_evaluation"
-            #         ),
-            #         store=True,
-            #         predict=False,
-            #         e_corr=e_corr,
-            #         tracks=self.args.tracks,
-            #         shap_vals=shap_vals,
-            #         ec_x=ec_x,
-            #         use_gt_clusters=self.args.use_gt_clusters,
-            #     )
-            #     del model_output1
-            #     del batch_g
         self.validation_step_outputs = []
         self.df_showers = []
         self.df_showers_pandora = []
@@ -435,36 +501,27 @@ class ExampleWrapper(L.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.args.start_lr)
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        #     optimizer,
-        #     T_max=int(7900*3), # for now for testing
-        #     eta_min=1e-6,
-        # )
-        # scheduler = CosineAnnealingThenFixedScheduler(optimizer,T_max=int(36400), fixed_lr=1e-6 ) #10000
-        # scheduler = WarmupCosineAnnealingThenFixedScheduler(
-        #     optimizer, warmup_steps=2000, T_max=int(36400*2), fixed_lr=1e-5
-        # )
         scheduler = CosineAnnealingThenFixedScheduler(optimizer, T_max=100000, fixed_lr=1e-6)
         self.scheduler = scheduler
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
-                "scheduler": scheduler,  # ReduceLROnPlateau(optimizer, patience=3),
+                "scheduler": scheduler,
                 "interval": "step",
                 "monitor": "train_loss_epoch",
-                "frequency": 1
-            }}
+                "frequency": 1,
+            },
+        }
+
     def lr_scheduler_step(self, scheduler, optimizer_idx, metric=None):
-        # Manually step the scheduler
         scheduler.step()
-   
+
     def correction_training_step(self, e_cor, e_true, neutral_idx):
         if self.args.correction:
             loss_EC_neutrals = torch.nn.L1Loss()(
                 e_cor[neutral_idx], e_true[neutral_idx]
             )
             wandb.log({"loss_EC_neutrals": loss_EC_neutrals})
-
             loss = loss + loss_EC_neutrals
 
 
@@ -476,11 +533,7 @@ def obtain_batch_numbers(g):
         gj = graphs_eval[index]
         num_nodes = gj.number_of_nodes()
         batch_numbers.append(index * torch.ones(num_nodes))
-        num_nodes = gj.number_of_nodes()
-    batch = torch.cat(batch_numbers, dim=0)
-    return batch
-
-
+    return torch.cat(batch_numbers, dim=0)
 
 
 class CosineAnnealingThenFixedScheduler:
@@ -494,82 +547,20 @@ class CosineAnnealingThenFixedScheduler:
     def step(self):
         if self.step_count < self.T_max:
             self.cosine_scheduler.step()
-            # for param_group in self.optimizer.param_groups:
-            #     print("before scheduler change", param_group['lr'])
         else:
             for param_group in self.optimizer.param_groups:
-                param_group['lr'] = self.fixed_lr
-                # print("after scheduler change",param_group['lr'])
+                param_group["lr"] = self.fixed_lr
         self.step_count += 1
 
     def get_last_lr(self):
         if self.step_count < self.T_max:
             return self.cosine_scheduler.get_last_lr()
-        else:
-            return [self.fixed_lr for _ in self.optimizer.param_groups]
-    def state_dict(self):
-        # Save the state including current step count and cosine scheduler state
-        return {
-            "step_count": self.step_count,
-            "cosine_scheduler_state": self.cosine_scheduler.state_dict()
-        }
-
-    def load_state_dict(self, state_dict):
-        # Restore step count and cosine scheduler state
-        self.step_count = state_dict["step_count"]
-        self.cosine_scheduler.load_state_dict(state_dict["cosine_scheduler_state"])
-
-def criterion(ypred, ytrue, step):
-    if True or step < 5000:  # Always use the L1 loss!!
-        #### ! using L1 loss for this training only!
-        return F.l1_loss(ypred, ytrue)
-    else:
-        losses = F.l1_loss(ypred, ytrue, reduction="none") / ytrue.abs()
-        if len(losses.shape) > 0:
-            if int(losses.size(0) * 0.05) > 1:
-                top_percentile = torch.kthvalue(
-                    losses, int(losses.size(0) * 0.95)
-                ).values
-                mask = losses > top_percentile
-                losses[mask] = 0.0
-        return losses.mean()
-
-
-class WarmupCosineAnnealingThenFixedScheduler:
-    def __init__(self, optimizer, warmup_steps, T_max, fixed_lr):
-        self.warmup_steps = warmup_steps
-        self.base_lrs = [pg['lr'] for pg in optimizer.param_groups]
-        self.cosine_scheduler = CosineAnnealingLR(optimizer, T_max=T_max - warmup_steps, eta_min=fixed_lr)
-        self.fixed_lr = fixed_lr
-        self.T_max = T_max
-        self.step_count = 0
-        self.optimizer = optimizer
-
-    def step(self):
-        if self.step_count < self.warmup_steps:
-            scale = (self.step_count + 1) / self.warmup_steps
-            for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
-                pg['lr'] = base_lr * scale
-        elif self.step_count < self.T_max:
-            self.cosine_scheduler.step()
-        else:
-            for pg in self.optimizer.param_groups:
-                pg['lr'] = self.fixed_lr
-        self.step_count += 1
-
-    def get_last_lr(self):
-        if self.step_count < self.warmup_steps:
-            scale = self.step_count / max(self.warmup_steps, 1)
-            return [base_lr * scale for base_lr in self.base_lrs]
-        elif self.step_count < self.T_max:
-            return self.cosine_scheduler.get_last_lr()
-        else:
-            return [self.fixed_lr for _ in self.optimizer.param_groups]
+        return [self.fixed_lr for _ in self.optimizer.param_groups]
 
     def state_dict(self):
         return {
             "step_count": self.step_count,
-            "cosine_scheduler_state": self.cosine_scheduler.state_dict()
+            "cosine_scheduler_state": self.cosine_scheduler.state_dict(),
         }
 
     def load_state_dict(self, state_dict):

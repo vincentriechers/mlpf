@@ -1,7 +1,25 @@
+"""GATr backbone with TRUE bidirectional sliding-window attention.
+
+Same model as ``Gatr_pf_e_noise.py`` except that, when ``args.window_size``
+is set (default 1024), hits are sorted by phi within each event and
+attention is restricted to ±W//2 phi-neighbours via flash-attn's varlen
+sliding-window kernel — the recipe hepattn's ``flash-varlen`` backend uses
+(cf. ``hepattn/models/attention.py``).
+
+GATr internally calls xformers' ``memory_efficient_attention``, which has
+no bidirectional sliding-window mask for per-event blocks. We do NOT edit
+``gatr``'s files. Instead, ``gatr_window.install_window_dispatch`` patches
+``gatr.primitives.attention._sdpa_graph_breaking`` at runtime so that, when
+the attn_mask is a :class:`FlashVarlenWindowMask`, it routes through
+``flash_attn_varlen_func(..., window_size=(W//2, W//2))``. All other GATr
+callers (any model that passes ``BlockDiagonalMask`` / ``None``) keep
+their original behaviour. See ``src/models/GATr/gatr_window/`` for details.
+"""
+
 from os import path
 import sys
 # sys.path.append(path.abspath("/mnt/proj3/dd-23-91/cern/geometric-algebra-transformer/"))
-import time 
+import time
 from gatr import GATr, SelfAttentionConfig, MLPConfig
 from gatr.interface import embed_point, extract_scalar, extract_point, embed_scalar
 import torch
@@ -22,6 +40,17 @@ import wandb
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from src.utils.nn.tools import log_losses_wandb
 import torch.nn.functional as F
+from src.layers.CML_loss import supcon_loss_node_equal
+
+from src.models.GATr.gatr_window import (
+    FlashVarlenWindowMask,
+    build_flash_varlen_window_mask,
+    install_window_dispatch,
+)
+
+# Patch GATr's attention dispatcher once at import time. No-op for any
+# caller that doesn't pass FlashVarlenWindowMask.
+install_window_dispatch()
 
 
 
@@ -106,13 +135,46 @@ class ExampleWrapper(L.LightningModule):
                 uot_ref = self.ScaledGooeyBatchNorm2_ref(g.ndata["uot_ref_xyz"].float())
                 embedded_ref = embed_point(uot_ref).unsqueeze(-2)  # (N, 1, 16)
                 embedded_inputs = torch.cat([embedded_inputs, embedded_ref], dim=-2)  # (N, 2, 16)
-            mask = self.build_attention_mask(g)
-            scalars = torch.zeros((inputs.shape[0], 1))
-            scalars = torch.cat((g.ndata["e_hits"].float(), g.ndata["p_hits"].float()), dim=1)  
-            # Pass data through GATr
+            scalars = torch.cat(
+                (g.ndata["e_hits"].float(), g.ndata["p_hits"].float()), dim=1
+            )
+
+            # Sliding-window path. ``window_size = 0`` (or ``None``) falls
+            # back to standard per-event BlockDiagonalMask attention.
+            window_size = getattr(self.args, "window_size", 1024)
+            if window_size:
+                W = int(window_size)
+                xyz = g.ndata["pos_hits_xyz"].float()
+                phi = torch.atan2(xyz[:, 1], xyz[:, 0])
+                seq_lens = g.batch_num_nodes()
+                device = embedded_inputs.device
+                # Stable argsort of (event, phi). The 1e6 multiplier on
+                # batch_ids dominates phi ∈ [-π, π], so events stay grouped.
+                batch_ids = torch.repeat_interleave(
+                    torch.arange(seq_lens.numel(), device=device, dtype=torch.long),
+                    seq_lens,
+                )
+                sort_keys = batch_ids.to(torch.float64) * 1e6 + phi.to(torch.float64)
+                perm = torch.argsort(sort_keys, stable=True)
+                inv_perm = torch.empty_like(perm)
+                inv_perm[perm] = torch.arange(perm.size(0), device=device)
+
+                embedded_inputs = embedded_inputs[perm]
+                scalars = scalars[perm]
+                mask = build_flash_varlen_window_mask(seq_lens, W, device=device)
+            else:
+                mask = self.build_attention_mask(g)
+                perm = inv_perm = None
+
+            # Pass data through GATr (flash-varlen sliding window if mask is
+            # FlashVarlenWindowMask, original SDPA otherwise; see
+            # ``gatr_window.install_window_dispatch``).
             embedded_outputs, scalar_outputs = self.gatr(
                 embedded_inputs, scalars=scalars, attention_mask=mask
             )  # (..., num_points, 1, 16)
+            if window_size:
+                embedded_outputs = embedded_outputs[inv_perm]
+                scalar_outputs = scalar_outputs[inv_perm]
             points = extract_point(embedded_outputs[:, 0, :])
             # Extract scalar and aggregate outputs from point cloud
             nodewise_outputs = extract_scalar(embedded_outputs)  # (..., num_points, 1, 1)
@@ -172,35 +234,36 @@ class ExampleWrapper(L.LightningModule):
         model_output = result[0].float()
         e_cor = result[1].float()
         if not self.args.correction:
-            with torch.autocast(device_type="cuda", enabled=False):
-                (loss, losses,) = object_condensation_loss2(
-                    batch_g,
-                    model_output,
-                    e_cor,
-                    y,
-                    clust_loss_only=True,
-                    add_energy_loss=False,
-                    calc_e_frac_loss=False,
-                    q_min=self.args.qmin,
-                    frac_clustering_loss=self.args.frac_cluster_loss,
-                    attr_weight=self.args.L_attractive_weight,
-                    repul_weight=self.args.L_repulsive_weight,
-                    fill_loss_weight=self.args.fill_loss_weight,
-                    use_average_cc_pos=self.args.use_average_cc_pos,
-                    loss_type=self.args.losstype,
-                    output_dim=self.output_dim,
-                    allpair_repulsion_weight=getattr(self.args, "allpair_repulsion_weight", 1.0),
-                    allpair_repulsion_margin=getattr(self.args, "allpair_repulsion_margin", 1.0),
-                    allpair_repulsion_knn=getattr(self.args, "allpair_repulsion_knn", 64),
-                    s_B=getattr(self.args, "beta_noise_weight", 1.0),
-                    # DELPHI only: tracks get their own (softer) noise weight so
-                    # labeled-track beta survives -- see --beta-noise-weight-track.
-                    s_B_track=(
-                        getattr(self.args, "beta_noise_weight_track", 0.05)
-                        if getattr(self.args, "delphi", False)
-                        else None
-                    ),
-                )
+            CML_loss = False
+            if CML_loss:
+                node_counts = batch_g.batch_num_nodes().tolist()
+                embeddings_split = torch.split(model_output[:, 0:self.output_dim - 1], node_counts)
+                group_ids_split = torch.split(batch_g.ndata["particle_number"], node_counts)
+                per_event_losses = [
+                    supcon_loss_node_equal(emb, gids)
+                    for emb, gids in zip(embeddings_split, group_ids_split)
+                ]
+                loss = torch.stack(per_event_losses).mean()
+                losses = {}
+            else:
+                with torch.autocast(device_type="cuda", enabled=False):
+                    (loss, losses,) = object_condensation_loss2(
+                        batch_g,
+                        model_output,
+                        e_cor,
+                        y,
+                        clust_loss_only=True,
+                        add_energy_loss=False,
+                        calc_e_frac_loss=False,
+                        q_min=self.args.qmin,
+                        frac_clustering_loss=self.args.frac_cluster_loss,
+                        attr_weight=self.args.L_attractive_weight,
+                        repul_weight=self.args.L_repulsive_weight,
+                        fill_loss_weight=self.args.fill_loss_weight,
+                        use_average_cc_pos=self.args.use_average_cc_pos,
+                        loss_type=self.args.losstype,
+                        output_dim=self.output_dim,
+                    )
         else:
             losses = {}
         if self.args.correction:

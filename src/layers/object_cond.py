@@ -31,6 +31,95 @@ def debug(*args, **kwargs):
         print(*args, **kwargs)
 
 
+def _build_within_event_knn_repulsion(
+    cluster_space_coords,   # (n_sig, dim) signal-hit cluster-space coords (grad-carrying)
+    batch_sig,              # (n_sig,)     event id per signal hit (sorted, grouped by event)
+    object_index,           # (n_sig,)     batch-global object index per signal hit
+    q_sig,                  # (n_sig,)     condensation charge q per signal hit
+    device,
+    k: int = 64,
+    margin: float = 1.0,
+    repulsion_weight: float = 1.0,
+):
+    """Point-to-point inter-shower repulsion.
+
+    For every signal hit, find its nearby signal hits (within-event kNN in cluster
+    space), keep only neighbours that belong to a *different* object, and apply a
+    charge-weighted linear hinge potential ``q_i * q_j * relu(margin - d_ij)``.
+    This complements the baseline repulsion (which only pushes a hit away from the
+    condensation/alpha point of each other object) by pushing it away from *all*
+    nearby hits of other showers -- directly targeting the Pandora "merged shower /
+    absorbed neutral" confusion mode.
+
+    Normalisation: per receiving hit we divide by its (fixed) number of other-object
+    neighbours and then average over the signal hits that have >=1 such neighbour.
+    This keeps the term invariant to the number of hits, the neighbour count ``k``,
+    the hit density and the batch size; and because the denominator is the fixed
+    neighbour count (not the count of pairs currently inside the margin) it avoids the
+    perverse "loss drops merely because a point left the margin" gradient.
+
+    kNN neighbour *selection* is non-differentiable (coords are detached for it); the
+    gradient flows through the gathered euclidean distances into ``cluster_space_coords``.
+    """
+    n_sig = cluster_space_coords.shape[0]
+    dtype = cluster_space_coords.dtype
+    zero = torch.tensor(0.0, device=device, dtype=dtype)
+    if n_sig <= 1:
+        return zero
+
+    # Per-event kNN. Signal hits are contiguous per event (batch is sorted), so a running
+    # offset maps each event's local node ids back to global signal-hit ids.
+    src_list, dst_list = [], []
+    hit_offset = 0
+    n_events = int(batch_sig.max().item()) + 1
+    for event_id in range(n_events):
+        event_mask = batch_sig == event_id
+        n_hits_event = int(event_mask.sum().item())
+        if n_hits_event <= 1:
+            hit_offset += n_hits_event
+            continue
+        coords_event = cluster_space_coords[event_mask]
+        # request k+1 because dgl.knn_graph counts self as the nearest neighbour
+        k_query = min(k + 1, n_hits_event)
+        graph = dgl.knn_graph(coords_event.detach(), k_query)
+        graph = dgl.remove_self_loop(graph)
+        src, dst = graph.edges()
+        # dgl runs kNN on CPU even for CUDA inputs and returns a CPU graph (see
+        # GravNetConv.knn_per_graph), so move the edge ids back onto `device`.
+        src_list.append(src.to(device) + hit_offset)
+        dst_list.append(dst.to(device) + hit_offset)
+        hit_offset += n_hits_event
+
+    if not src_list:
+        return zero
+    src_all = torch.cat(src_list)
+    dst_all = torch.cat(dst_list)
+
+    # Keep only edges between hits of *different* objects (same event is guaranteed by the
+    # per-event construction above).
+    inter_mask = object_index[src_all] != object_index[dst_all]
+    if not inter_mask.any():
+        return zero
+    src_i = src_all[inter_mask]
+    dst_i = dst_all[inter_mask]
+
+    # Differentiable distances on the grad-carrying coords.
+    dist = torch.norm(cluster_space_coords[src_i] - cluster_space_coords[dst_i], dim=-1)
+    hinge = torch.relu(margin - dist)
+    V = q_sig[src_i] * q_sig[dst_i] * hinge
+
+    # Per-receiving-hit aggregation + normalisation by the fixed other-object neighbour count.
+    ones = torch.ones_like(src_i, dtype=dtype)
+    n_neighbors = scatter_add(ones, src_i, dim=0, dim_size=n_sig)
+    L_per_hit = scatter_add(V, src_i, dim=0, dim_size=n_sig)
+    has_neighbor = n_neighbors > 0
+    if not has_neighbor.any():
+        return zero
+    L_per_hit = L_per_hit / torch.clamp(n_neighbors, min=1.0)
+    L = torch.mean(L_per_hit[has_neighbor])
+    return repulsion_weight * L
+
+
 def calc_LV_Lbeta(
     original_coords,
     g,
@@ -59,12 +148,36 @@ def calc_LV_Lbeta(
     repul_weight=1.0,
     fill_loss_weight=0.0,
     use_average_cc_pos=0.0,
-    loss_type="hgcalimplementation",
+    loss_type="baseline",
     hit_energies=None,
     tracking=False,
     dis=False,
+    track_repulsion_margin: float = 2.0,
+    track_repulsion_weight: float = 1.0,
+    subcal_att_weight: float = 1.0,
+    subcal_rep_weight: float = 1.0,
+    allpair_repulsion_weight: float = 1.0,
+    allpair_repulsion_margin: float = 1.0,
+    allpair_repulsion_knn: int = 64,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor], dict]:
-    loss_type ="baseline"
+    # "baseline_track_rep"    = baseline + track-pair long-range repulsion.
+    # "baseline_subcal_att"   = baseline + per-detector-type (ECAL/HCAL) sub-cluster
+    #                           attractive and repulsive potentials so that the ECAL
+    #                           hits of each particle cluster together (and repel those
+    #                           of other particles), and likewise for HCAL.
+    # "baseline_allpair_rep"  = baseline + point-to-point inter-shower repulsion:
+    #                           each signal hit is pushed away from *all nearby* signal
+    #                           hits of other objects (within-event kNN in cluster space),
+    #                           not just from those objects' condensation/alpha points.
+    # NOTE: detect the opt-in variants from the *input* loss_type FIRST, then force the
+    # baseline core unconditionally. Keeping the unconditional override means every
+    # loss_type still maps to the baseline branch exactly as before (default behaviour is
+    # unchanged); detecting beforehand is what makes these flags actually fire -- they were
+    # previously dead because the override ran before the detection.
+    add_allpair_repulsion = (loss_type == "baseline_allpair_rep")
+    add_track_repulsion   = (loss_type == "baseline_track_rep")
+    add_subcal_attraction = (loss_type == "baseline_subcal_att")
+    loss_type = "baseline"
     """
     Calculates the L_V and L_beta object condensation losses.
     Concepts:
@@ -88,6 +201,8 @@ def calc_LV_Lbeta(
     """
     # remove dummy rows added for dataloader #TODO think of better way to do this
     device = beta.device
+    L_V_subcal = torch.tensor(0.0, device=device)  # overwritten when add_subcal_attraction
+    L_V_allpair_rep = torch.tensor(0.0, device=device)  # overwritten when add_allpair_repulsion
     if torch.isnan(beta).any():
         print("There are nans in beta! L198", len(beta[torch.isnan(beta)]))
 
@@ -170,14 +285,14 @@ def calc_LV_Lbeta(
     if use_average_cc_pos > 0:
         #! this is a func of beta and q so maybe we could also do it with only q
         x_alpha_sum = scatter_add(
-            q[is_sig].view(-1, 1).repeat(1, 3) * cluster_space_coords[is_sig],
+            q[is_sig].view(-1, 1).repeat(1, cluster_space_dim) * cluster_space_coords[is_sig],
             object_index,
             dim=0,
-        )  # * beta[is_sig].view(-1, 1).repeat(1, 3)
-        qbeta_alpha_sum = scatter_add(q[is_sig], object_index) + 1e-9  # * beta[is_sig]
+        )
+        qbeta_alpha_sum = scatter_add(q[is_sig], object_index) + 1e-9
         div_fac = 1 / qbeta_alpha_sum
         div_fac = torch.nan_to_num(div_fac, nan=0)
-        x_alpha_mean = torch.mul(x_alpha_sum, div_fac.view(-1, 1).repeat(1, 3))
+        x_alpha_mean = torch.mul(x_alpha_sum, div_fac.view(-1, 1).repeat(1, cluster_space_dim))
         x_alpha = use_average_cc_pos * x_alpha_mean + (1 - use_average_cc_pos) * x_alpha
     if dis:
         phi_sum = scatter_add(
@@ -285,6 +400,125 @@ def calc_LV_Lbeta(
         V_attractive = (q_track[is_sig]).unsqueeze(-1) * q_alpha.unsqueeze(0) * norms_att
         V_attractive = V_attractive.sum(dim=0)  # K objects
         L_V_attractive_tracks = torch.mean(V_attractive)
+
+        # Long-range track-paired repulsion (mirror of L_V_attractive_tracks).
+        # Only signal track hits push, and only against alphas of objects that also
+        # contain a track — so two well-reconstructed charged particles get an extra
+        # margin in cluster space. Fake tracks are filtered by the chi^2 cut in
+        # q_track_mask; noise hits are excluded via is_sig.
+        if add_track_repulsion:
+            is_track_sig = q_track_mask[is_sig].view(-1).bool()
+            object_has_track = scatter_max(is_track_sig.long(), object_index)[0].bool()
+            alpha_track_mask = object_has_track.float().unsqueeze(0)  # (1, n_objects)
+            q_track_repel = q_track * is_sig.float()  # (n_hits,) zero on noise/non-track
+            dist = torch.sqrt(norms + 1e-6)  # baseline branch holds squared norms here
+            hinge_track = torch.relu(track_repulsion_margin - dist) ** 2
+            M_inv_track = M_inv * alpha_track_mask
+            V_repulsive_tracks = (
+                q_track_repel.unsqueeze(1) * q_alpha.unsqueeze(0) * hinge_track * M_inv_track
+            )
+            L_V_repulsive_tracks = V_repulsive_tracks.sum(dim=0).mean()
+        else:
+            L_V_repulsive_tracks = torch.tensor(0.0, device=device)
+
+        # Sub-cluster (per-detector-type) attractive + repulsive terms.
+        # For hit_type_id in {2=ECAL, 3=HCAL}: the hits of that type belonging to
+        # one object should cluster together in cluster space (attractive), and should
+        # push away from the corresponding sub-cluster centre of every other object
+        # (repulsive).  This directly targets the Pandora "absorbed neutral / merged
+        # shower" confusion mode.
+        if add_subcal_attraction:
+            def _subcal_loss(hit_type_id):
+                is_type_sig = (g.ndata["hit_type"] == hit_type_id) & is_sig  # (n_hits,)
+                type_hits_per_obj = scatter_add(
+                    is_type_sig[is_sig].long(), object_index
+                )  # (n_objects,)
+                obj_has_type = type_hits_per_obj > 0  # (n_objects,)
+
+                if not obj_has_type.any():
+                    zero = torch.tensor(0.0, device=device)
+                    return zero, zero
+
+                # Condensation point among this detector type per object.
+                # For objects without this type the value is 0; obj_has_type masks them out.
+                q_type = q * is_type_sig.float()  # (n_hits,)
+                q_type_alpha, idx_type_alpha = scatter_max(
+                    q_type[is_sig], object_index
+                )  # (n_objects,)
+                x_type_alpha = cluster_space_coords[is_sig][idx_type_alpha]  # (n_objects, dim)
+
+                # Squared norms from all sig hits to type-alpha points
+                norms_type_sq = torch.sum(
+                    torch.square(
+                        cluster_space_coords[is_sig].unsqueeze(1)
+                        - x_type_alpha.unsqueeze(0)
+                    ),
+                    dim=-1,
+                )  # (n_hits_sig, n_objects)
+
+                type_mask = is_type_sig[is_sig].float()   # (n_hits_sig,) 1 for this type
+                obj_type_mask = obj_has_type.float()       # (n_objects,)
+
+                # Attractive: type-hits pulled toward their own object's type-alpha,
+                # using the same log-norm as the baseline attractive term.
+                norms_type_att = torch.log(
+                    torch.exp(torch.tensor([1.0], device=device)) * norms_type_sq / 2 + 1
+                )
+                V_type_att = (
+                    q[is_sig].unsqueeze(1)
+                    * q_type_alpha.unsqueeze(0)
+                    * norms_type_att
+                    * M[is_sig]                      # own-object mask
+                    * type_mask.unsqueeze(1)         # only this detector type
+                    * obj_type_mask.unsqueeze(0)     # only objects that have this type
+                )  # (n_hits_sig, n_objects)
+                V_type_att = V_type_att.sum(dim=0) / (type_hits_per_obj.float() + 1e-3)
+                L_type_att = torch.mean(V_type_att[obj_has_type])
+
+                # Repulsive: type-hits push away from *other* objects' type-alpha,
+                # using the same hinge form as the baseline repulsive term.
+                M_inv_sig = M_inv[is_sig]  # (n_hits_sig, n_objects)
+                dist_type = torch.sqrt(norms_type_sq + 1e-6)
+                norms_type_rep = (
+                    torch.relu(1.0 - dist_type)
+                    * M_inv_sig
+                    * obj_type_mask.unsqueeze(0)
+                    * type_mask.unsqueeze(1)
+                )
+                V_type_rep = (
+                    q[is_sig].unsqueeze(1) * q_type_alpha.unsqueeze(0) * norms_type_rep
+                )
+                n_rep_terms = torch.sum(
+                    M_inv_sig * type_mask.unsqueeze(1) * obj_type_mask.unsqueeze(0), dim=0
+                )
+                V_type_rep = V_type_rep.sum(dim=0) / (n_rep_terms + 1e-3)
+                L_type_rep = torch.mean(V_type_rep[obj_has_type])
+
+                return L_type_att, L_type_rep
+
+            L_V_ecal_att, L_V_ecal_rep = _subcal_loss(2)  # ECAL (hit_type == 2)
+            L_V_hcal_att, L_V_hcal_rep = _subcal_loss(3)  # HCAL (hit_type == 3)
+            L_V_subcal = (
+                subcal_att_weight * (L_V_ecal_att + L_V_hcal_att)
+                + subcal_rep_weight * (L_V_ecal_rep + L_V_hcal_rep)
+            )
+        else:
+            L_V_subcal = torch.tensor(0.0, device=device)
+
+        # All-pair inter-shower repulsion: push each signal hit away from nearby signal
+        # hits of *other* objects (point-to-point), not just away from their alpha point.
+        if add_allpair_repulsion:
+            L_V_allpair_rep = _build_within_event_knn_repulsion(
+                cluster_space_coords[is_sig],
+                batch[is_sig],
+                object_index,
+                q[is_sig],
+                device=device,
+                k=allpair_repulsion_knn,
+                margin=allpair_repulsion_margin,
+                repulsion_weight=allpair_repulsion_weight,
+            )
+
     elif loss_type == "hgcalimplementation":
 
         V_attractive = (q[is_sig]).unsqueeze(-1) * q_alpha.unsqueeze(0) * norms_att
@@ -462,10 +696,12 @@ def calc_LV_Lbeta(
         ).sum()
     if loss_type == "baseline":
          L_V = (
-                L_V_attractive 
-                + L_V_repulsive   
-                +L_V_attractive_tracks
-                
+                L_V_attractive
+                + L_V_repulsive
+                + L_V_attractive_tracks
+                + track_repulsion_weight * L_V_repulsive_tracks
+                + L_V_subcal
+                + L_V_allpair_rep
             )
     else:   
         if testing_object_cond:
@@ -591,7 +827,8 @@ def calc_LV_Lbeta(
 
     L_beta = L_beta_noise + L_beta_sig 
 
-    L_alpha_coordinates = torch.mean(torch.norm(x_alpha_original - x_alpha, p=2, dim=1))
+    # x_alpha_original is always 3D (xyz); compare only the first 3 dims of x_alpha
+    L_alpha_coordinates = torch.mean(torch.norm(x_alpha_original - x_alpha[:, :3], p=2, dim=1))
 
    
     if torch.isnan(L_beta / batch_size):
@@ -623,7 +860,8 @@ def calc_LV_Lbeta(
             norms_rep,  # 16
             norms_att,  # 17
             L_V_repulsive2,
-            0
+            L_V_subcal,  # 19: sub-cluster (ECAL+HCAL) loss; 0 unless loss_type=="baseline_subcal_att"
+            L_V_allpair_rep,  # 20: all-pair inter-shower repulsion; 0 unless loss_type=="baseline_allpair_rep"
         )
 
 
@@ -1180,12 +1418,15 @@ def object_condensation_loss2(
     repul_weight=1.0,
     fill_loss_weight=1.0,
     use_average_cc_pos=0.0,
-    loss_type="hgcalimplementation",
+    loss_type="baseline",
     output_dim=4,
     clust_space_norm="none",
     dis=False,
     s_B=1.0,
     s_B_track=None,
+    allpair_repulsion_weight: float = 1.0,
+    allpair_repulsion_margin: float = 1.0,
+    allpair_repulsion_knn: int = 64,
 ):
     """
 
@@ -1213,7 +1454,7 @@ def object_condensation_loss2(
 
     bj = torch.sigmoid(torch.reshape(pred[:, clust_space_dim], [-1, 1]))  # 3: betas
     # print("bj", bj)
-    original_coords = batch.ndata["h"][:, 0:clust_space_dim]
+    original_coords = batch.ndata["h"][:, 0:3]  # always xyz, independent of clust_space_dim
     if dis:
         distance_threshold = torch.reshape(pred[:, -1], [-1, 1])
     else:
@@ -1262,6 +1503,9 @@ def object_condensation_loss2(
         dis=dis,
         s_B=s_B,
         s_B_track=s_B_track,
+        allpair_repulsion_weight=allpair_repulsion_weight,
+        allpair_repulsion_margin=allpair_repulsion_margin,
+        allpair_repulsion_knn=allpair_repulsion_knn,
     )
 
    

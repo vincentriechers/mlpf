@@ -3,6 +3,15 @@ import torch
 from sklearn.preprocessing import StandardScaler
 from dataclasses import dataclass
 from typing import Any, List, Optional
+import awkward as ak
+
+
+def _ak_to_tensor(a):
+    """Fast awkward Array -> torch tensor: one bulk ak.to_numpy() conversion
+    instead of torch.tensor() iterating element-by-element over an awkward Array
+    (which pays awkward's per-op dispatch/error-context tax per row)."""
+    return torch.from_numpy(np.ascontiguousarray(ak.to_numpy(a)))
+
 
 
 @dataclass
@@ -25,7 +34,7 @@ class Particles_GT():
 
     def fill(self, output, prediction, args):
         
-        features_particles = torch.tensor(output["X_gen"])
+        features_particles = _ak_to_tensor(output["X_gen"])
         if getattr(args, "delphi", False):
             # DELPHI stores positions in cm, the pipeline assumes mm; scale the
             # position columns (vertex 15:18, endpoint 18:21) but NOT 12:15,

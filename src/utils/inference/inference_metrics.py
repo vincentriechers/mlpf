@@ -4,7 +4,7 @@ import torch
 import numpy as np
 from scipy import stats
 from scipy.optimize import curve_fit
-from scipy import asarray as ar, exp
+from numpy import asarray as ar, exp  # scipy removed these aliases; numpy provides them
 from src.utils.pid_conversion import our_to_pandora_mapping, pandora_to_our_mapping
 import pandas as pd
 
@@ -113,6 +113,14 @@ def calculate_response(matched, pandora, log_scale=False):
 def get_sigma_gaussian(e_over_reco, bins_per_binned_E, epsilon=0.01, return_gaussian=False, return_divided=True):
     #mpv, std = obtain_MPV_and_68(e_over_reco, bins_per_binned_E)
     #return mpv, std, None, None
+    # Drop non-finite entries so the histogram / Gaussian fit / sigma-over-mu never see NaN;
+    # a width needs >= 2 finite points, else return NaN (matplotlib gaps the bin cleanly).
+    if isinstance(e_over_reco, pd.Series):
+        e_over_reco = e_over_reco.values
+    e_over_reco = np.asarray(e_over_reco, dtype=float)
+    e_over_reco = e_over_reco[np.isfinite(e_over_reco)]
+    if e_over_reco.size < 2:
+        return np.nan, np.nan, 0.0, 0.0
     hist, bin_edges = np.histogram(e_over_reco, bins=bins_per_binned_E, density=True)
 
     if not return_gaussian:
@@ -155,18 +163,30 @@ def get_sigma_gaussian(e_over_reco, bins_per_binned_E, epsilon=0.01, return_gaus
     return param_optimised[1], param_optimised[2], errors[1], errors[2] / param_optimised[1]
 
 def obtain_MPV_and_68(data_for_hist, bins_per_binned_E, epsilon=0.01, no_divide=False):
+    # Robust to sparse / degenerate / non-finite bins. A width is undefined for < 2 finite
+    # entries: return NaN rather than emit a torch.std() "degrees of freedom <= 0" warning
+    # (single-entry Bessel /(n-1)) or raise a ZeroDivisionError (MPV == 0). Well-populated
+    # bins are unchanged (same histogram + get_std68 path as before).
+    if isinstance(data_for_hist, pd.Series):
+        data_for_hist = data_for_hist.values
+    data_for_hist = np.asarray(data_for_hist, dtype=float)
+    data_for_hist = data_for_hist[np.isfinite(data_for_hist)]
+    if data_for_hist.size < 2:
+        return np.nan, np.nan
     hist, bin_edges = np.histogram(data_for_hist, bins=bins_per_binned_E, density=True)
     ind_max_hist = np.argmax(hist)
     MPV = (bin_edges[ind_max_hist] + bin_edges[ind_max_hist + 1]) / 2
     std68, low, high = get_std68(hist, bin_edges, epsilon=epsilon)
-    
+
     if std68 == 0.4 and low == 0.2 and high == 1.0:
-        # It didn't fit correctly as it's too close to a delta function
-        if type(data_for_hist) == pd.Series:
-            data_for_hist = data_for_hist.values
-        MPV, std68 = torch.mean(torch.tensor(data_for_hist)).item(), torch.std(torch.tensor(data_for_hist)).item()
+        # get_std68 hit its no-fit fallback (near delta-function): use the sample mean/std.
+        # np.std is the population std (ddof=0) -> finite for any n>=1, unlike torch.std's
+        # default Bessel correction which is NaN for a single entry.
+        MPV, std68 = float(np.mean(data_for_hist)), float(np.std(data_for_hist))
     if no_divide:
         return MPV, std68
+    if not np.isfinite(MPV) or MPV == 0:
+        return MPV, np.nan
     return MPV, std68 / MPV
 
 

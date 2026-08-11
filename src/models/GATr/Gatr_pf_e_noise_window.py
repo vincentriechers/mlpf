@@ -1,7 +1,24 @@
+"""GATr backbone with phi-windowed block-diagonal attention.
+
+Same model as ``Gatr_pf_e_noise.py`` except that, when ``args.window_size`` is
+set, hits are sorted by phi within each event and the per-event block in
+``BlockDiagonalMask`` is sub-divided into non-overlapping chunks of
+``window_size`` consecutive (sorted) hits — i.e. each token only attends to
+phi-neighbours within its window.
+
+This mirrors ``mlpf_add_mask3d/mlpf/src/models/Mask3D/encoder.py``'s
+phi-windowed attention path. Note: GATr's ``forward`` takes a single
+``attention_mask`` shared across all blocks, so we don't implement the
+Swin-style W//2 alternation that the Mask3D Encoder uses (that would require
+reaching into ``gatr.blocks`` and stepping through them manually). Setting
+``args.window_size = None`` recovers the original ``Gatr_pf_e_noise``
+behaviour (full per-event attention).
+"""
+
 from os import path
 import sys
 # sys.path.append(path.abspath("/mnt/proj3/dd-23-91/cern/geometric-algebra-transformer/"))
-import time 
+import time
 from gatr import GATr, SelfAttentionConfig, MLPConfig
 from gatr.interface import embed_point, extract_scalar, extract_point, embed_scalar
 import torch
@@ -22,6 +39,30 @@ import wandb
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from src.utils.nn.tools import log_losses_wandb
 import torch.nn.functional as F
+from src.layers.CML_loss import supcon_loss_node_equal
+
+
+def _chunk_seqlens(seq_lens, W, shift=0):
+    """Split each event of length L into chunks of size W (last may be shorter).
+
+    Mirrors ``Mask3D/encoder.py:_chunk_seqlens``. ``shift > 0`` produces a
+    first chunk of at most ``shift`` hits, then full ``W`` chunks, then a
+    remainder — used for Swin-style alternation. We keep the helper here for
+    parity even though the GATr API only lets us use a single mask.
+    """
+    out = []
+    for L in seq_lens:
+        if L <= 0:
+            continue
+        i = 0
+        if shift > 0 and L > shift:
+            out.append(shift)
+            i = shift
+        while i < L:
+            chunk = min(W, L - i)
+            out.append(chunk)
+            i += chunk
+    return out
 
 
 
@@ -106,13 +147,33 @@ class ExampleWrapper(L.LightningModule):
                 uot_ref = self.ScaledGooeyBatchNorm2_ref(g.ndata["uot_ref_xyz"].float())
                 embedded_ref = embed_point(uot_ref).unsqueeze(-2)  # (N, 1, 16)
                 embedded_inputs = torch.cat([embedded_inputs, embedded_ref], dim=-2)  # (N, 2, 16)
-            mask = self.build_attention_mask(g)
-            scalars = torch.zeros((inputs.shape[0], 1))
-            scalars = torch.cat((g.ndata["e_hits"].float(), g.ndata["p_hits"].float()), dim=1)  
+            scalars = torch.cat((g.ndata["e_hits"].float(), g.ndata["p_hits"].float()), dim=1)
+
+            # Phi-windowed block-diagonal attention path. Sort hits by
+            # (event, phi); chunk each phi-sorted event-run into windows of
+            # `window_size` consecutive tokens; build the BlockDiagonalMask
+            # over those chunks; un-permute outputs at the end.
+            #
+            # Default = 1024 (hepattn / Mask3D parity). Set
+            # ``args.window_size = 0`` (or ``None``) to disable and fall
+            # back to full per-event attention.
+            window_size = getattr(self.args, "window_size", 1024)
+            if window_size:
+                xyz = g.ndata["pos_hits_xyz"].float()
+                phi = torch.atan2(xyz[:, 1], xyz[:, 0])
+                mask, perm, inv_perm = self._build_window_mask(g, phi, int(window_size))
+                embedded_inputs = embedded_inputs[perm]
+                scalars = scalars[perm]
+            else:
+                mask = self.build_attention_mask(g)
+
             # Pass data through GATr
             embedded_outputs, scalar_outputs = self.gatr(
                 embedded_inputs, scalars=scalars, attention_mask=mask
             )  # (..., num_points, 1, 16)
+            if window_size:
+                embedded_outputs = embedded_outputs[inv_perm]
+                scalar_outputs = scalar_outputs[inv_perm]
             points = extract_point(embedded_outputs[:, 0, :])
             # Extract scalar and aggregate outputs from point cloud
             nodewise_outputs = extract_scalar(embedded_outputs)  # (..., num_points, 1, 1)
@@ -150,6 +211,32 @@ class ExampleWrapper(L.LightningModule):
 
     def build_attention_mask(self, g):
         return BlockDiagonalMask.from_seqlens(g.batch_num_nodes().tolist())
+
+    def _build_window_mask(self, g, phi, window_size):
+        """Phi-sorted, chunked BlockDiagonalMask. Returns (mask, perm, inv_perm).
+
+        ``perm`` reorders the flat token stream so each event's hits are
+        contiguous *and* sorted by phi within the event. Each phi-sorted run
+        is then split into non-overlapping chunks of ``window_size``; each
+        chunk becomes its own block in the BlockDiagonalMask, so attention
+        is strictly local in phi.
+        """
+        seq_lens = g.batch_num_nodes().tolist()
+        device = phi.device
+        seq_lens_t = torch.as_tensor(seq_lens, device=device, dtype=torch.long)
+        batch_ids = torch.repeat_interleave(
+            torch.arange(len(seq_lens), device=device, dtype=torch.long),
+            seq_lens_t,
+        )
+        # batch_ids dominates so events stay grouped; phi orders within each.
+        sort_keys = batch_ids.to(torch.float64) * 1e6 + phi.to(torch.float64)
+        perm = torch.argsort(sort_keys, stable=True)
+        inv_perm = torch.empty_like(perm)
+        inv_perm[perm] = torch.arange(perm.size(0), device=device)
+
+        chunked = _chunk_seqlens(seq_lens, window_size, shift=0)
+        mask = BlockDiagonalMask.from_seqlens(chunked)
+        return mask, perm, inv_perm
     def unfreeze_all(self):
         for p in self.energy_correction.model_charged.parameters():
             p.requires_grad = True
@@ -172,35 +259,36 @@ class ExampleWrapper(L.LightningModule):
         model_output = result[0].float()
         e_cor = result[1].float()
         if not self.args.correction:
-            with torch.autocast(device_type="cuda", enabled=False):
-                (loss, losses,) = object_condensation_loss2(
-                    batch_g,
-                    model_output,
-                    e_cor,
-                    y,
-                    clust_loss_only=True,
-                    add_energy_loss=False,
-                    calc_e_frac_loss=False,
-                    q_min=self.args.qmin,
-                    frac_clustering_loss=self.args.frac_cluster_loss,
-                    attr_weight=self.args.L_attractive_weight,
-                    repul_weight=self.args.L_repulsive_weight,
-                    fill_loss_weight=self.args.fill_loss_weight,
-                    use_average_cc_pos=self.args.use_average_cc_pos,
-                    loss_type=self.args.losstype,
-                    output_dim=self.output_dim,
-                    allpair_repulsion_weight=getattr(self.args, "allpair_repulsion_weight", 1.0),
-                    allpair_repulsion_margin=getattr(self.args, "allpair_repulsion_margin", 1.0),
-                    allpair_repulsion_knn=getattr(self.args, "allpair_repulsion_knn", 64),
-                    s_B=getattr(self.args, "beta_noise_weight", 1.0),
-                    # DELPHI only: tracks get their own (softer) noise weight so
-                    # labeled-track beta survives -- see --beta-noise-weight-track.
-                    s_B_track=(
-                        getattr(self.args, "beta_noise_weight_track", 0.05)
-                        if getattr(self.args, "delphi", False)
-                        else None
-                    ),
-                )
+            CML_loss = False
+            if CML_loss:
+                node_counts = batch_g.batch_num_nodes().tolist()
+                embeddings_split = torch.split(model_output[:, 0:self.output_dim - 1], node_counts)
+                group_ids_split = torch.split(batch_g.ndata["particle_number"], node_counts)
+                per_event_losses = [
+                    supcon_loss_node_equal(emb, gids)
+                    for emb, gids in zip(embeddings_split, group_ids_split)
+                ]
+                loss = torch.stack(per_event_losses).mean()
+                losses = {}
+            else:
+                with torch.autocast(device_type="cuda", enabled=False):
+                    (loss, losses,) = object_condensation_loss2(
+                        batch_g,
+                        model_output,
+                        e_cor,
+                        y,
+                        clust_loss_only=True,
+                        add_energy_loss=False,
+                        calc_e_frac_loss=False,
+                        q_min=self.args.qmin,
+                        frac_clustering_loss=self.args.frac_cluster_loss,
+                        attr_weight=self.args.L_attractive_weight,
+                        repul_weight=self.args.L_repulsive_weight,
+                        fill_loss_weight=self.args.fill_loss_weight,
+                        use_average_cc_pos=self.args.use_average_cc_pos,
+                        loss_type=self.args.losstype,
+                        output_dim=self.output_dim,
+                    )
         else:
             losses = {}
         if self.args.correction:

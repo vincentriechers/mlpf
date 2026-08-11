@@ -19,9 +19,10 @@ import string
 import hdbscan
 import time
 try:
-    import densitypeakclustering as dc  # optional: only used by density-peak inference clustering
+    import densitypeakclustering as dc  # only used by DPC/OC path
 except ModuleNotFoundError:
-    dc = None
+    dc = None  # Mask3D path doesn't need it; functions that use dc will
+               # NameError at call time if invoked without the package.
 from src.utils.pid_conversion import pid_conversion_dict as _PID_CONV_DICT
 # from src.layers.dpc_track_seeded import DPC_track_seeded  # module absent; only use is commented out below
 
@@ -208,18 +209,6 @@ def DPC(X, device):
     labels = torch.Tensor(core_ids)+1
     return labels.long().to(device)
 
-def make_cluster_labels_dense(labels):
-    labels = labels.long()
-    dense_labels = torch.zeros_like(labels)
-    next_label = 1
-    for label in torch.unique(labels):
-        if label.item() == 0:
-            dense_labels[labels == label] = 0
-            continue
-        dense_labels[labels == label] = next_label
-        next_label += 1
-    return dense_labels
-
 def remove_bad_tracks_from_cluster_v1(g, labels_hdb):
     mask_hit_type_t1 = g.ndata["hit_type"]==2
     mask_hit_type_t2 = g.ndata["hit_type"]==1
@@ -376,7 +365,6 @@ def create_and_store_graph_output(
                 labels_hdb = compact_labels_preserve_zero(labels_hdb)
         if predict and pandora_available:
             labels_pandora = get_labels_pandora(tracks, dic, model_output.device)
-            labels_pandora = compact_labels_preserve_zero(labels_pandora)
             num_clusters_pandora = len(labels_pandora.unique())
         particle_ids = torch.unique(dic["graph"].ndata["particle_number"])
         
@@ -411,6 +399,7 @@ def create_and_store_graph_output(
                 tracks=tracks,
             )
 
+        dic["graph"].ndata["labels"]=labels_hdb
         # --- debug dump of per-event graph + clustering (gated by env var DUMP_GRAPHS=<N>) ---
         _dump_max = int(os.environ.get("DUMP_GRAPHS", "0"))
         if _dump_max > 0:
@@ -554,6 +543,17 @@ def store_at_batch_end(
     store=False,
     pandora_available=False
 ):
+    if predict:
+        path_save_ = (
+            path_save
+            + str(local_rank)
+            + "_"
+            + str(step)
+            + "_"
+            + str(epoch)
+            + ".pt"
+        )
+       
     path_save_ = (
         path_save
         + str(local_rank)
@@ -564,7 +564,6 @@ def store_at_batch_end(
         + ".pt"
     )
     if store and predict:
-        os.makedirs(os.path.dirname(path_save_), exist_ok=True)
         df_batch1.to_pickle(path_save_)
     if predict and pandora_available:
         path_save_pandora = (
@@ -584,6 +583,10 @@ def store_at_batch_end(
 
 
 def log_efficiency(df, pandora=False, clustering=False):
+    if len(df) == 0 or "reco_showers_E" not in df.columns:
+        # empty batch df (e.g. zero matched showers) — nothing to log
+        print("[log_efficiency] empty df, skipping (pandora=%s)" % pandora)
+        return
     mask = ~np.isnan(df["reco_showers_E"])
     eff = np.sum(~np.isnan(df["pred_showers_E"][mask].values)) / len(
         df["pred_showers_E"][mask].values
@@ -674,7 +677,16 @@ def generate_showers_data_frame(
     e_pred_showers_ecal = scatter_add(1*(dic["graph"].ndata["hit_type"].view(-1)==2), labels)
     e_pred_showers_hcal = scatter_add(1*(dic["graph"].ndata["hit_type"].view(-1)==3), labels)
     if not pandora:
-        removed_tracks = scatter_add(1*labels_clusters_removed_tracks, labels)
+        if labels_clusters_removed_tracks is not None:
+            removed_tracks = scatter_add(1*labels_clusters_removed_tracks, labels)
+        else:
+            # Mask3D path doesn't run remove_bad_tracks_from_cluster_v1 — no
+            # hits ever get reassigned to noise on this path — so the
+            # downstream "tracks removed per shower" count is zero. Match the
+            # shape `scatter_add` would have produced (max(labels)+1,).
+            removed_tracks = torch.zeros(
+                int(labels.max().item()) + 1, device=labels.device
+            )
     if pandora:
         e_pred_showers_cali = scatter_mean(
             dic["graph"].ndata["pandora_pfo_energy"].view(-1), labels
@@ -721,7 +733,14 @@ def generate_showers_data_frame(
             )
     else:
         if e_corr is None:
-            corrections_per_shower = get_correction_per_shower(labels, dic)
+            if "correction" in dic["graph"].ndata:
+                corrections_per_shower = get_correction_per_shower(labels, dic)
+            else:
+                # Clustering-only eval (no --correction): no per-hit
+                # "correction" ndata exists. Leave energies uncorrected
+                # (calibrated == raw) so `pred_showers_E` / Σpred-Σreco
+                # still reflect pure clustering completeness.
+                corrections_per_shower = torch.ones_like(e_pred_showers)
             e_pred_showers_cali = e_pred_showers * corrections_per_shower
         else:
             corrections_per_shower = e_corr.view(-1)
@@ -830,6 +849,16 @@ def generate_showers_data_frame(
             matched_es_cali = matched_es.clone()
             number_of_showers = e_pred_showers[index_matches].shape[0] # DOESN'T INCLUDE THE FAKE SHOWERS
             #number_of_fake_showers = e_pred_showers.shape[0] - number_of_showers
+            # corrections_per_shower (and pred_pos/pred_ref_pt/pred_pid/
+            # extra_features) are laid out by `obtain_clustering_for_matched_
+            # showers` as `[event0_matched, event1_matched, ..., eventN_matched,
+            # event0_fakes, event1_fakes, ...]` — matched clusters in event
+            # order at the head, fakes at the tail. After the head-only strip
+            # of `number_of_fakes`, the per-event windows are exactly
+            # `N_matched_i` long. This requires EC and inference to be matching
+            # against the same labels — for the Mask3D path that means passing
+            # `--mask3d-use-mask-labels` so the EC pipeline uses
+            # `labels_from_masks` instead of running its own DPC clustering.
             matched_es_cali[row_ind_] = (
                 corrections_per_shower[
                     number_of_showers_total : number_of_showers_total
@@ -843,9 +872,6 @@ def generate_showers_data_frame(
                 #* e_pred_showers[index_matches]
             )
 
-            # if len(row_ind) and len(index_matches):
-            #     assert row_ind.max() < len(is_track)
-            #     assert index_matches.max() < len(is_track_per_shower)
             if pred_pos is not None:
                 matched_positions[row_ind_] = pred_pos[number_of_showers_total : number_of_showers_total
                     + number_of_showers]
@@ -1177,12 +1203,8 @@ def obtain_intersection_matrix(shower_p_unique, particle_ids, labels, dic, e_hit
         h_hits = e_hits.clone()
         counts[mask_p] = 1
         h_hits[~mask_p] = 0
-        intersection_matrix[:, index] = scatter_add(
-            counts, labels, dim=0, dim_size=len_pred_showers
-        )
-        intersection_matrix_w[:, index] = scatter_add(
-            h_hits, labels.to(h_hits.device), dim=0, dim_size=len_pred_showers
-        )
+        intersection_matrix[:, index] = scatter_add(counts, labels)
+        intersection_matrix_w[:, index] = scatter_add(h_hits, labels.to(h_hits.device))
     return intersection_matrix, intersection_matrix_w
 
 
@@ -1194,7 +1216,7 @@ def obtain_union_matrix(shower_p_unique, particle_ids, labels, dic):
         counts = torch.zeros_like(labels)
         mask_p = dic["graph"].ndata["particle_number"] == id
         for index_pred, id_pred in enumerate(shower_p_unique):
-            mask_pred_p = labels == index_pred
+            mask_pred_p = labels == id_pred
             mask_union = mask_pred_p + mask_p
             union_matrix[index_pred, index] = torch.sum(mask_union)
 
@@ -1304,16 +1326,13 @@ def match_showers(
             ),
             dim=0,
         )
-    dense_labels = torch.zeros_like(labels, dtype=torch.long)
-    for dense_idx, pred_label in enumerate(shower_p_unique):
-        dense_labels[labels == pred_label] = dense_idx
     e_hits = dic["graph"].ndata["e_hits"].view(-1)
     i_m, i_m_w = obtain_intersection_matrix(
-        shower_p_unique, particle_ids, dense_labels, dic, e_hits
+        shower_p_unique, particle_ids, labels, dic, e_hits
     )
     i_m = i_m.to(model_output.device)
     i_m_w = i_m_w.to(model_output.device)
-    u_m = obtain_union_matrix(shower_p_unique, particle_ids, dense_labels, dic)
+    u_m = obtain_union_matrix(shower_p_unique, particle_ids, labels, dic)
     u_m = u_m.to(model_output.device)
     iou_matrix = i_m / u_m
     if torch.sum(particle_ids == 0) > 0:

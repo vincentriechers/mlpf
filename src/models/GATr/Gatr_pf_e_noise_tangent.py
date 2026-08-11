@@ -3,7 +3,7 @@ import sys
 # sys.path.append(path.abspath("/mnt/proj3/dd-23-91/cern/geometric-algebra-transformer/"))
 import time 
 from gatr import GATr, SelfAttentionConfig, MLPConfig
-from gatr.interface import embed_point, extract_scalar, extract_point, embed_scalar
+from gatr.interface import embed_point, extract_scalar, extract_point, embed_scalar, embed_translation
 import torch
 import torch.nn as nn
 from src.logger.plotting_tools import PlotCoordinates
@@ -25,6 +25,7 @@ import torch.nn.functional as F
 
 
 
+
 class ExampleWrapper(L.LightningModule):
     def __init__(
         self,
@@ -38,8 +39,7 @@ class ExampleWrapper(L.LightningModule):
         super().__init__()
         self.strict_loading = False
         self.input_dim = 3
-        clust_dim = getattr(args, "clustering_space_dim", 3)
-        self.output_dim = clust_dim + 1  # clust_dim coords + 1 beta
+        self.output_dim = 4
         self.loss_final = 0
         self.number_b = 0
         self.df_showers = []
@@ -48,9 +48,8 @@ class ExampleWrapper(L.LightningModule):
         self.args = args
         self.dev = dev
         self.config = config
-        _in_mv = 2 if getattr(args, "uot_labels", False) else 1
         self.gatr = GATr(
-            in_mv_channels=_in_mv,
+            in_mv_channels=1,
             out_mv_channels=1,
             hidden_mv_channels=hidden_mv_channels,
             in_s_channels=2,
@@ -61,8 +60,6 @@ class ExampleWrapper(L.LightningModule):
             mlp=MLPConfig(),  # Use default parameters for MLP
         )
         self.ScaledGooeyBatchNorm2_1 = nn.BatchNorm1d(self.input_dim, momentum=0.1)
-        if getattr(args, "uot_labels", False):
-            self.ScaledGooeyBatchNorm2_ref = nn.BatchNorm1d(3, momentum=0.1)
         self.clustering = nn.Linear(3, self.output_dim - 1, bias=False)
         self.beta = nn.Linear(2, 1)
         # Initialize the energy correction module
@@ -75,6 +72,7 @@ class ExampleWrapper(L.LightningModule):
         else:
             self.pids_neutral = []
             self.pids_charged = []
+        # Build list of 4-class IDs whose hit labels should be replaced with true MC labels
         self._fix_clusters_class = []
         if getattr(self.args, 'fix_ch', False):
             self._fix_clusters_class.append(1)
@@ -99,13 +97,10 @@ class ExampleWrapper(L.LightningModule):
                 )
             inputs_scalar = g.ndata["hit_type"].float().view(-1, 1)
             inputs = self.ScaledGooeyBatchNorm2_1(inputs)
-            embedded_hits = embed_point(inputs) + embed_scalar(inputs_scalar)
-            embedded_inputs = embedded_hits.unsqueeze(-2)   # (N, 1, 16)
-
-            if getattr(self.args, "uot_labels", False) and "uot_ref_xyz" in g.ndata:
-                uot_ref = self.ScaledGooeyBatchNorm2_ref(g.ndata["uot_ref_xyz"].float())
-                embedded_ref = embed_point(uot_ref).unsqueeze(-2)  # (N, 1, 16)
-                embedded_inputs = torch.cat([embedded_inputs, embedded_ref], dim=-2)  # (N, 2, 16)
+            embedded_inputs = embed_point(inputs) + embed_scalar(inputs_scalar)+embed_translation(g.ndata["tangents"])
+            embedded_inputs = embedded_inputs.unsqueeze(
+                -2
+            )  # (batch_size*num_points, 1, 16)
             mask = self.build_attention_mask(g)
             scalars = torch.zeros((inputs.shape[0], 1))
             scalars = torch.cat((g.ndata["e_hits"].float(), g.ndata["p_hits"].float()), dim=1)  
@@ -141,15 +136,17 @@ class ExampleWrapper(L.LightningModule):
         else:
             x = torch.ones_like(g.ndata["h"][:,0:4])
         if self.args.correction:
-            with torch.autocast(device_type="cuda", enabled=False):
-                result = self.energy_correction.forward_correction(g, x.float(), y, return_train)
+            result = self.energy_correction.forward_correction(g, x, y, return_train)
             return result
         else:
             pred_energy_corr = torch.ones_like(beta.view(-1, 1))
             return x, pred_energy_corr, 0, 0
 
     def build_attention_mask(self, g):
-        return BlockDiagonalMask.from_seqlens(g.batch_num_nodes().tolist())
+        batch_numbers = obtain_batch_numbers(g)
+        return BlockDiagonalMask.from_seqlens(
+            torch.bincount(batch_numbers.long()).tolist()
+        )
     def unfreeze_all(self):
         for p in self.energy_correction.model_charged.parameters():
             p.requires_grad = True
@@ -169,38 +166,25 @@ class ExampleWrapper(L.LightningModule):
         else:
             result = self(batch_g, y, 1, use_gt_clusters=use_gt)
 
-        model_output = result[0].float()
-        e_cor = result[1].float()
+        model_output = result[0]
+        e_cor = result[1]
         if not self.args.correction:
-            with torch.autocast(device_type="cuda", enabled=False):
-                (loss, losses,) = object_condensation_loss2(
-                    batch_g,
-                    model_output,
-                    e_cor,
-                    y,
-                    clust_loss_only=True,
-                    add_energy_loss=False,
-                    calc_e_frac_loss=False,
-                    q_min=self.args.qmin,
-                    frac_clustering_loss=self.args.frac_cluster_loss,
-                    attr_weight=self.args.L_attractive_weight,
-                    repul_weight=self.args.L_repulsive_weight,
-                    fill_loss_weight=self.args.fill_loss_weight,
-                    use_average_cc_pos=self.args.use_average_cc_pos,
-                    loss_type=self.args.losstype,
-                    output_dim=self.output_dim,
-                    allpair_repulsion_weight=getattr(self.args, "allpair_repulsion_weight", 1.0),
-                    allpair_repulsion_margin=getattr(self.args, "allpair_repulsion_margin", 1.0),
-                    allpair_repulsion_knn=getattr(self.args, "allpair_repulsion_knn", 64),
-                    s_B=getattr(self.args, "beta_noise_weight", 1.0),
-                    # DELPHI only: tracks get their own (softer) noise weight so
-                    # labeled-track beta survives -- see --beta-noise-weight-track.
-                    s_B_track=(
-                        getattr(self.args, "beta_noise_weight_track", 0.05)
-                        if getattr(self.args, "delphi", False)
-                        else None
-                    ),
-                )
+            (loss, losses,) = object_condensation_loss2(
+                batch_g,
+                model_output,
+                e_cor,
+                y,
+                clust_loss_only=True,
+                add_energy_loss=False,
+                calc_e_frac_loss=False,
+                q_min=self.args.qmin,
+                frac_clustering_loss=self.args.frac_cluster_loss,
+                attr_weight=self.args.L_attractive_weight,
+                repul_weight=self.args.L_repulsive_weight,
+                fill_loss_weight=self.args.fill_loss_weight,
+                use_average_cc_pos=self.args.use_average_cc_pos,
+                loss_type=self.args.losstype,
+            )
         else:
             losses = {}
         if self.args.correction:
@@ -306,7 +290,6 @@ class ExampleWrapper(L.LightningModule):
                 tracks=self.args.tracks,
                 shap_vals=shap_vals,
                 ec_x=ec_x,
-                clust_dim=self.output_dim - 1,
                 total_number_events=self.total_number_events,
                 pred_pos=pred_pos,
                 pred_ref_pt=pred_ref_pt,
@@ -440,11 +423,7 @@ class ExampleWrapper(L.LightningModule):
         #     T_max=int(7900*3), # for now for testing
         #     eta_min=1e-6,
         # )
-        # scheduler = CosineAnnealingThenFixedScheduler(optimizer,T_max=int(36400), fixed_lr=1e-6 ) #10000
-        # scheduler = WarmupCosineAnnealingThenFixedScheduler(
-        #     optimizer, warmup_steps=2000, T_max=int(36400*2), fixed_lr=1e-5
-        # )
-        scheduler = CosineAnnealingThenFixedScheduler(optimizer, T_max=100000, fixed_lr=1e-6)
+        scheduler = CosineAnnealingThenFixedScheduler(optimizer,T_max=int(36400*2), fixed_lr=1e-5 ) #10000
         self.scheduler = scheduler
         return {
             "optimizer": optimizer,
@@ -533,45 +512,3 @@ def criterion(ypred, ytrue, step):
                 mask = losses > top_percentile
                 losses[mask] = 0.0
         return losses.mean()
-
-
-class WarmupCosineAnnealingThenFixedScheduler:
-    def __init__(self, optimizer, warmup_steps, T_max, fixed_lr):
-        self.warmup_steps = warmup_steps
-        self.base_lrs = [pg['lr'] for pg in optimizer.param_groups]
-        self.cosine_scheduler = CosineAnnealingLR(optimizer, T_max=T_max - warmup_steps, eta_min=fixed_lr)
-        self.fixed_lr = fixed_lr
-        self.T_max = T_max
-        self.step_count = 0
-        self.optimizer = optimizer
-
-    def step(self):
-        if self.step_count < self.warmup_steps:
-            scale = (self.step_count + 1) / self.warmup_steps
-            for pg, base_lr in zip(self.optimizer.param_groups, self.base_lrs):
-                pg['lr'] = base_lr * scale
-        elif self.step_count < self.T_max:
-            self.cosine_scheduler.step()
-        else:
-            for pg in self.optimizer.param_groups:
-                pg['lr'] = self.fixed_lr
-        self.step_count += 1
-
-    def get_last_lr(self):
-        if self.step_count < self.warmup_steps:
-            scale = self.step_count / max(self.warmup_steps, 1)
-            return [base_lr * scale for base_lr in self.base_lrs]
-        elif self.step_count < self.T_max:
-            return self.cosine_scheduler.get_last_lr()
-        else:
-            return [self.fixed_lr for _ in self.optimizer.param_groups]
-
-    def state_dict(self):
-        return {
-            "step_count": self.step_count,
-            "cosine_scheduler_state": self.cosine_scheduler.state_dict()
-        }
-
-    def load_state_dict(self, state_dict):
-        self.step_count = state_dict["step_count"]
-        self.cosine_scheduler.load_state_dict(state_dict["cosine_scheduler_state"])
