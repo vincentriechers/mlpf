@@ -578,6 +578,7 @@ def get_response_for_event_energy(matched_pandora, matched_, perfect_pid=False, 
         dic["energy_over_true_reco_pandora"] = dic_pandora["E_over_true_reco"]
         dic["var_energy_over_true_pandora"] = var_energy_over_true_pandora
         dic["mean_energy_over_true_pandora"] = mean_energy_over_true_pandora
+        dic["E_pandora"] = dic_pandora["E_pred"]  # absolute reconstructed event energy [GeV]
 
     dic["mass_over_true_model"] = dic_model["mass_over_true_p"]
     dic["variance_om"] = variance_om
@@ -595,7 +596,9 @@ def get_response_for_event_energy(matched_pandora, matched_, perfect_pid=False, 
     dic["mean_energy_over_true"] = mean_energy_over_true
     dic["var_energy_over_true"] = var_energy_over_true
     dic["energy_over_true_reco"] = dic_model["E_over_true_reco"]
-    
+    dic["E_model"] = dic_model["E_pred"]    # absolute reconstructed event energy [GeV]
+    dic["E_true_abs"] = dic_model["E_true"]  # absolute true event energy [GeV]
+
     return dic
 
 colors = {"ML": "red", "ML GTC": "green"}

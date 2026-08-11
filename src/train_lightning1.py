@@ -4,9 +4,9 @@ import os
 import sys
 import glob
 import torch
+torch.set_float32_matmul_precision("high")
 import lightning as L
-
-torch.set_float32_matmul_precision("high")  # TF32 tensor cores for FP32 GA matmuls (Blackwell sm_120)
+from lightning.pytorch.callbacks import Callback as _LCallback
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.strategies import DDPStrategy
 
@@ -35,6 +35,11 @@ from src.utils.callbacks import (
 # ----------------------------------------------------------------------
 
 def setup_wandb(args):
+    # log_model is off by default — staging checkpoints into wandb's cache
+    # blew the home quota on BSC. The local checkpoints under --model-prefix
+    # are unaffected. Re-enable with WANDB_LOG_MODEL=all if needed.
+    log_model_env = os.environ.get("WANDB_LOG_MODEL", "false").lower()
+    log_model = "all" if log_model_env in ("all", "true", "1") else False
     # save_dir MUST be off AFS: WandbLogger defaults save_dir="." (repo cwd on AFS, quota-limited)
     # and passes it to wandb.init as `dir`, overriding the WANDB_DIR env. Writing offline run data
     # to a near-full AFS volume can block rank-0 writes and re-trigger the DDP collective-timeout hang.
@@ -42,20 +47,86 @@ def setup_wandb(args):
         project=args.wandb_projectname,
         entity=args.wandb_entity,
         name=args.wandb_displayname,
+        log_model=log_model,
         save_dir=os.environ.get("WANDB_DIR", "/data/mgarciam/wandb"),
     )
 
 
+class _UnusedParamsDiag(_LCallback):
+    # MASK3D_DIAG_UNUSED=1 — print parameter names whose grad is None after
+    # the first training backward (rank 0 only), then no-op. Used to pin down
+    # which submodule is silently disconnected from the loss graph when DDP
+    # raises "parameters were not used in producing the loss".
+    def __init__(self):
+        self.fired = False
+
+    def on_after_backward(self, trainer, pl_module):
+        if self.fired or not trainer.is_global_zero:
+            return
+        self.fired = True
+        unused = sorted(
+            n for n, p in pl_module.named_parameters()
+            if p.requires_grad and p.grad is None
+        )
+        sep = "=" * 72
+        lines = [sep, "MASK3D_DIAG_UNUSED — first backward (rank 0)", sep]
+        if unused:
+            lines.append(f"count: {len(unused)}")
+            lines.extend(f"  {n}" for n in unused)
+        else:
+            lines.append("(none — all parameters are in the autograd graph)")
+        lines.append(sep)
+        print("\n".join(lines), file=sys.stderr, flush=True)
+
+
 def build_trainer(args, gpus, logger, training=True):
     callbacks = get_callbacks(args) if training else get_callbacks_eval(args)
+    # Plain DDP works for the default model config (`share_decoder_heads=True`,
+    # `per_subsystem_input=False`). If either is flipped — or any other
+    # config that leaves some params unused on some steps — DDP errors out;
+    # we set `find_unused_parameters=True` whenever the network options
+    # request it. ~5–15% slower but correct-by-construction.
+    netopt = dict(getattr(args, "network_option", []) or [])
+    diag_unused = os.environ.get("MASK3D_DIAG_UNUSED", "") == "1"
+    needs_find_unused = (
+        netopt.get("per_subsystem_input", "False") == "True"
+        or netopt.get("per_subsystem_loss", "False") == "True"
+        or netopt.get("share_decoder_heads", "True") == "False"
+        or netopt.get("num_subsystems", "1") not in ("1", "")
+        or diag_unused
+    )
     if args.correction and training:
+        # energy-correction training leaves some params unused per step (origin/main)
         strategy = DDPStrategy(find_unused_parameters=True)
-    elif training:
-        strategy = DDPStrategy(static_graph=True)
-    else:
+    elif args.correction:
         strategy = "auto"
+    elif training:
+        strategy = (
+            DDPStrategy(find_unused_parameters=True) if needs_find_unused else "ddp"
+        )
+    else:
+        # Eval / --predict without --correction: let Lightning pick the
+        # strategy (SingleDeviceStrategy for one GPU). Newer Lightning
+        # rejects `strategy=None`; the --correction path already uses
+        # "auto" for the same reason.
+        strategy = "auto"
+
+    if training and diag_unused:
+        callbacks = list(callbacks) + [_UnusedParamsDiag()]
+
+    # Gradient clipping is REQUIRED for stability of this stack (we observed
+    # NaN/Inf cost crashes in scipy.linear_sum_assignment around step 36k of
+    # a no-clip run on H100 / bf16 — bidirectional CA + windowed attention
+    # can spike logits before the matcher sees them). 0.1 matches hepattn's
+    # CLD config; the trainer applies it to the global gradient L2 norm.
+    grad_clip_val = float(getattr(args, "gradient_clip_val", 0.1))
+
+    # Mixed precision: --use-amp turns on bf16-mixed (matches hepattn). bf16
+    # is the right choice on H100/A100 — wider exponent range than fp16, no
+    # loss-scaling needed, and stable with our LayerNorm-heavy backbone.
+    precision = "bf16-mixed" if getattr(args, "use_amp", False) else "32-true"
+
     return L.Trainer(
-        gradient_clip_val=1.0, gradient_clip_algorithm="norm",
         callbacks=callbacks,
         accelerator="gpu",
         devices=gpus,
@@ -66,7 +137,9 @@ def build_trainer(args, gpus, logger, training=True):
         strategy=strategy,
         limit_train_batches=args.train_batches if training else None,
         limit_val_batches=5 if training else None,
-        precision="bf16-mixed" if training else "32",
+        gradient_clip_val=grad_clip_val if training else None,
+        gradient_clip_algorithm="norm",
+        precision=precision,
     )
 
 
@@ -130,11 +203,14 @@ def main():
         trainer = build_trainer(args, gpus, wandb_logger, training=True)
         args.local_rank = trainer.global_rank
 
+        # --resume-ckpt restores weights + optimizer + LR scheduler + global
+        # step from a Lightning checkpoint. Default None = fresh run.
+        resume_ckpt = getattr(args, "resume_ckpt", None) or None
         trainer.fit(
             model=model,
             train_dataloaders=train_loader,
             val_dataloaders=val_loader,
-            ckpt_path=args.resume_ckpt,
+            ckpt_path=resume_ckpt,
         )
 
     # --------------------------------------------------
@@ -189,7 +265,7 @@ def main():
             _m, _u = model.load_state_dict(_state_dict(args.load_model_weights_clustering), strict=False)
             print(f"[eval]   loaded state_dict: {len(_m)} missing, {len(_u)} unexpected keys")
         elif args.load_model_weights:
-            model = load_test_model(args, dev)
+            model = load_test_model(args, dev, data_config)
 
         trainer = build_trainer(args, gpus, wandb_logger, training=False)
 

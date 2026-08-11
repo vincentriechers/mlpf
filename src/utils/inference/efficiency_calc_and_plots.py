@@ -9,7 +9,7 @@ def create_eff_dic_pandora(matched_pandora, id):
     our_id = pandora_to_our_mapping[id]
     id_group = our_to_pandora_mapping[our_id]
     mask_id_true = matched_pandora.pid.isin(id_group)
-    matched_pandora_id = matched_pandora[mask_id_true]
+    matched_pandora_id = matched_pandora[mask_id_true].copy()
     # calculate eff without pid (pure clustering)
     eff_p, energy_eff_p, errors_p = calculate_eff(matched_pandora_id, log_scale=True, pandora=True )
     
@@ -49,7 +49,7 @@ def create_eff_dic(photons_dic, matched_, id, var_i, calc_fakes=True):
     our_id = pandora_to_our_mapping[id]
     id_group = our_to_pandora_mapping[our_id]
     mask_id_gt = matched_.pid.isin(id_group)
-    matched_id = matched_[mask_id_gt]
+    matched_id = matched_[mask_id_gt].copy()
     # calculate eff without pid (pure clustering)
     eff, energy_eff, errors = calculate_eff(matched_id, log_scale=True)
   

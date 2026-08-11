@@ -48,8 +48,12 @@ def PlotCoordinates(
             features = torch.sigmoid(graph_i.ndata["beta"])
 
         tidx = graph_i.ndata["particle_number"]
-        # .float(): numpy cannot represent bfloat16 (model outputs under bf16-mixed)
+        coords = coords.float()
+        features = features.float()
         data = {
+            # .float() upcasts: numpy has no bfloat16, so under --use-amp
+            # (bf16-mixed) coords/features are BFloat16 and .numpy() raises
+            # "Got unsupported ScalarType BFloat16". No-op for fp32.
             "X": coords[:, 0].view(-1, 1).detach().float().cpu().numpy(),
             "Y": coords[:, 1].view(-1, 1).detach().float().cpu().numpy(),
             "Z": coords[:, 2].view(-1, 1).detach().float().cpu().numpy(),

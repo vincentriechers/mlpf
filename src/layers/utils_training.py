@@ -1,16 +1,19 @@
 
 from lightning.pytorch.callbacks import BaseFinetuning
+import os
 import torch
 import torch.nn as nn
 import dgl
 from src.layers.inference_oc import (
     get_clustering,
 )
-from src.layers.inference_oc import hfdb_obtain_labels, clustering_obtain_labels, DPC_custom_CLD
+from src.layers.inference_oc import hfdb_obtain_labels, clustering_obtain_labels, DPC_custom_CLD, DPC_custom_CLD_240
 from src.layers.inference_oc import match_showers
 # import torch_cmspepr  # unused here; compiled ext not available in the gatr:v9 container
 from src.layers.inference_oc import remove_bad_tracks_from_cluster_v1
 from src.layers.inference_oc import _fix_labels_for_classes
+from src.layers.inference_oc import compact_labels_preserve_zero
+# from src.layers.dpc_track_seeded import DPC_track_seeded  # module absent from maskIPA snapshot; only used in commented-out code
 class FreezeClustering(BaseFinetuning):
     def __init__(
         self,
@@ -45,25 +48,47 @@ class FreezeClustering(BaseFinetuning):
 
 
 def obtain_batch_numbers(x, g):
-    dev = x.device
-    graphs_eval = dgl.unbatch(g)
-    number_graphs = len(graphs_eval)
-    batch_numbers = []
-    for index in range(0, number_graphs):
-        gj = graphs_eval[index]
-        num_nodes = gj.number_of_nodes()
-        batch_numbers.append(index * torch.ones(num_nodes).to(dev))
-        # num_nodes = gj.number_of_nodes()
+    counts = g.batch_num_nodes()
+    return torch.repeat_interleave(
+        torch.arange(len(counts), device=x.device), counts
+    )
 
-    batch = torch.cat(batch_numbers, dim=0)
-    return batch
 
+
+def add_lonely_tracks(g, labels, p_max=2.0):
+    """Recovery option (env ADD_LONELY_TRACKS=1): promote 'lonely' tracks — track hits
+    (hit_type==1) left in label 0 (noise), i.e. not picked up by the clustering step —
+    with momentum < p_max GeV to their own new clusters. Because it runs before the
+    energy-correction head, these soft charged tracks are then reconstructed as particles
+    (energy from the track), so they contribute to the visible mass/energy."""
+    ht = g.ndata["hit_type"].view(-1)
+    p = g.ndata["p_hits"].view(-1)
+    lab = labels.view(-1)
+    lonely = (ht == 1) & (lab == 0) & (p < p_max)
+    idx = torch.nonzero(lonely).view(-1)
+    if idx.numel() == 0:
+        return labels
+    labels = labels.clone()
+    start = int(labels.max().item()) + 1
+    labels[idx] = torch.arange(start, start + idx.numel(), device=labels.device, dtype=labels.dtype)
+    return labels
 
 
 def obtain_clustering_for_matched_showers(
     batch_g, model_output, y_all, local_rank, use_gt_clusters=False, add_fakes=True, truth_tracks=False,
-    fix_clusters_class=None,
+    fix_clusters_class=None, clust_dim=3,
+    precomputed_labels=None,
 ):
+    """Match predicted showers to GT particles per event.
+
+    `precomputed_labels` (optional): a flat (total_hits,) int64 tensor of
+    cluster IDs (0 = noise, 1..K = cluster) in graph node order. When set,
+    skip the DPC + bad-track-filter step and use these labels directly —
+    used by the Mask3D path so the EC pipeline doesn't redundantly
+    recluster the ECAdapter's synthetic coords. coords/beta on the graph
+    are still set from `model_output` so downstream feature computation
+    (e.g. the EC heads' `graphs_new.ndata["h"]`) is unchanged.
+    """
     if use_gt_clusters:
         pass  # GT clusters mode: labels come from particle_number
     graphs_showers_matched = []
@@ -74,10 +99,17 @@ def obtain_clustering_for_matched_showers(
     energy_true_daughters = []
     y_pids_matched = []
     y_coords_matched = []
+    all_cluster_labels = []
     if not  use_gt_clusters:
-        batch_g.ndata["coords"] = model_output[:, 0:3]
-        batch_g.ndata["beta"] = model_output[:, 3]
+        batch_g.ndata["coords"] = model_output[:, 0:clust_dim]
+        batch_g.ndata["beta"] = model_output[:, clust_dim]
     graphs = dgl.unbatch(batch_g)
+    # Per-event hit-offset table for slicing precomputed_labels.
+    if precomputed_labels is not None:
+        node_counts = batch_g.batch_num_nodes()                # (B,) tensor
+        hit_offsets = torch.zeros(len(graphs) + 1, dtype=torch.long,
+                                  device=node_counts.device)
+        hit_offsets[1:] = node_counts.cumsum(0)
     batch_id = y_all.batch_number
     for i in range(0, len(graphs)):
         mask = batch_id == i
@@ -97,14 +129,39 @@ def obtain_clustering_for_matched_showers(
         elif clustering_mode == "dbscan":
             if use_gt_clusters:
                 labels = dic["graph"].ndata["particle_number"].type(torch.int64)
+            elif precomputed_labels is not None:
+                # Mask3D path: use the model's per-(query, hit) argmax labels
+                # directly. They're already dense (0 = noise, 1..K = cluster)
+                # via labels_from_masks, so no DPC + bad-track + re-densify
+                # cycle is needed. Same node order as the graph.
+                #
+                # NOTE: remove_bad_tracks_from_cluster_v1 must NOT be applied
+                # here. On the Mask3D path the EC pipeline pre-computes
+                # corrections_per_shower / pred_pos / pred_pid / etc. indexed
+                # by THESE original mask labels (enforced by
+                # --mask3d-use-mask-labels). Mutating/re-densifying labels
+                # after that desyncs match_showers from the EC outputs and
+                # the per-shower arrays end up different lengths
+                # (pd.DataFrame -> "All arrays must be of the same length").
+                # To clean bad tracks on this path, do it where
+                # `labels_from_masks` is generated, BEFORE the EC runs.
+                labels = (
+                    precomputed_labels[hit_offsets[i]:hit_offsets[i + 1]]
+                    .to(model_output.device).long()
+                )
             else:
-                #labels = hfdb_obtain_labels(X, model_output.device)
+                #labels =DPC_track_seeded(X, dic["graph"], model_output.device)
                 labels =DPC_custom_CLD(X, dic["graph"], model_output.device)
                 if not truth_tracks:
                     labels, _ = remove_bad_tracks_from_cluster_v1(dic["graph"], labels)
+                    labels = compact_labels_preserve_zero(labels)  # remap positives to 1..N, keep 0=noise
+                if os.environ.get("ADD_LONELY_TRACKS") == "1":
+                    labels = add_lonely_tracks(dic["graph"], labels, float(os.environ.get("LONELY_TRACK_PMAX", "2.0")))
                 # labels = clustering_obtain_labels( X,betas.view(-1), betas.device,  tbeta=0.7, td=0.3)
                 #if labels.min() == 0 and labels.sum() == 0:
                 #    labels += 1  # Quick hack
+
+        all_cluster_labels.append(labels)
 
         if fix_clusters_class:
             labels = _fix_labels_for_classes(
@@ -112,8 +169,50 @@ def obtain_clustering_for_matched_showers(
             )
             if not truth_tracks:
                 labels, _ = remove_bad_tracks_from_cluster_v1(dic["graph"], labels)
-                _, labels = torch.unique(labels, return_inverse=True)
+                labels = compact_labels_preserve_zero(labels)
         particle_ids = torch.unique(dic["graph"].ndata["particle_number"])
+        if os.environ.get("DUMP_NH_FATE") == "1":
+            # Diagnostic: for each true neutral hadron (K_L/n), trace where its CALO energy
+            # goes under the model's clustering -> reconstructed (owns its dominant cluster),
+            # absorbed (dominant cluster owned by another particle), or noise (label 0).
+            import numpy as _np
+            _g = dic["graph"]; _ht = _g.ndata["hit_type"].view(-1).long().cpu().numpy()
+            _calo = _ht != 1
+            _pn = _g.ndata["particle_number"].view(-1).long().cpu().numpy()[_calo]
+            _eh = _g.ndata["e_hits"].view(-1).float().cpu().numpy()[_calo]
+            _lb = labels.view(-1).long().cpu().numpy()[_calo]
+            _pt = dic["part_true"]; _pids = _pt.pid.view(-1).cpu().numpy(); _Et = _pt.E_corrected.view(-1).cpu().numpy()
+            _gs = _pt.gen_status.view(-1).cpu().numpy()
+            _rows = []
+            # row format: pid, gen_status, true_E, Edep, n_calo_hits, noise_frac, fate(0=recon,1=noise,2=absorbed,3=no-deposit), owner_pid
+            for _k in range(_pids.shape[0]):
+                if int(abs(_pids[_k])) not in (130, 2112):
+                    continue
+                _hk = _pn == (_k + 1); _Edep = float(_eh[_hk].sum()); _nh = int(_hk.sum())
+                if _Edep <= 0:
+                    _rows.append((float(_pids[_k]), float(_gs[_k]), float(_Et[_k]), 0.0, _nh, 0.0, 3, 0)); continue
+                _labs = _lb[_hk]; _ek = _eh[_hk]
+                _bL = 0; _bE = -1.0
+                for _L in _np.unique(_labs):
+                    _e = _ek[_labs == _L].sum()
+                    if _e > _bE: _bE = _e; _bL = int(_L)
+                _noise = float(_ek[_labs == 0].sum()) / _Edep
+                if _bL == 0:
+                    _rows.append((float(_pids[_k]), float(_gs[_k]), float(_Et[_k]), _Edep, _nh, _noise, 1, 0)); continue
+                _inL = _lb == _bL; _pin = _pn[_inL]; _ein = _eh[_inL]
+                _oP = 0; _oE = -1.0
+                for _p in _np.unique(_pin):
+                    _e = _ein[_pin == _p].sum()
+                    if _e > _oE: _oE = _e; _oP = int(_p)
+                if _oP == (_k + 1):
+                    _rows.append((float(_pids[_k]), float(_gs[_k]), float(_Et[_k]), _Edep, _nh, _noise, 0, int(_pids[_k])))
+                elif _oP == 0:
+                    _rows.append((float(_pids[_k]), float(_gs[_k]), float(_Et[_k]), _Edep, _nh, _noise, 1, 0))
+                else:
+                    _rows.append((float(_pids[_k]), float(_gs[_k]), float(_Et[_k]), _Edep, _nh, _noise, 2, int(_pids[_oP - 1])))
+            with open(os.environ.get("DUMP_NH_FATE_PATH", "/tmp/nh_fate.csv"), "a") as _f:
+                for _r in _rows:
+                    _f.write(",".join(str(_x) for _x in _r) + "\n")
         shower_p_unique = torch.unique(labels)
         shower_p_unique, row_ind, col_ind, i_m_w, _ = match_showers(
             labels, dic, particle_ids, model_output, local_rank, i, None
@@ -214,6 +313,7 @@ def obtain_clustering_for_matched_showers(
                 graphs_showers_fakes.append(g)
                 reco_energy_shower = torch.sum(graphs[i].ndata["e_hits"][mask])
                 reco_energy_showers_fakes.append(reco_energy_shower.view(-1))
+    batch_g.ndata["pred_cluster_labels"] = torch.cat(all_cluster_labels)
     graphs_showers_matched = dgl.batch(graphs_showers_matched + graphs_showers_fakes)
     true_energy_showers = torch.cat(true_energy_showers, dim=0)
     reco_energy_showers = torch.cat(reco_energy_showers + reco_energy_showers_fakes, dim=0)

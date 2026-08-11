@@ -49,7 +49,18 @@ def model_setup(args, data_config):
     :return: model, model_info, network_module, network_options
     """
     network_module = import_module(args.network_config, name="_network_module")
-    network_options = {k: ast.literal_eval(v) for k, v in args.network_option}
+
+    # `ast.literal_eval` accepts only Python literals (numbers, quoted
+    # strings, True/False/None, tuples/lists/dicts). A bare value like
+    # `focal` raises ValueError. Fall back to the raw string in that case
+    # so `--network-option mask_loss_type focal` works without
+    # shell-escaping quotes.
+    def _parse_option(v):
+        try:
+            return ast.literal_eval(v)
+        except (ValueError, SyntaxError):
+            return v
+    network_options = {k: _parse_option(v) for k, v in args.network_option}
 
     if args.gpus:
         gpus = [int(i) for i in args.gpus.split(",")]  # ?
@@ -258,8 +269,11 @@ def train_load(args):
         pin_memory=True,
         num_workers=min(args.num_workers, int(len(train_files) * args.file_fraction)),
         collate_fn=collator_func,
+        # Was False — respawning workers each epoch trashes the EOS read
+        # cache and adds startup time per epoch. Keeping them alive is
+        # ~always the right call when num_workers > 0.
         persistent_workers=args.num_workers > 0,
-        prefetch_factor=prefetch_factor
+        prefetch_factor=prefetch_factor,
     )
     val_loader = DataLoader(
         val_data,

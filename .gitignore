@@ -1,49 +1,41 @@
-# =========================
-# OS-generated files
-# =========================
-.DS_Store
-Thumbs.db
-Desktop.ini
-
-# =========================
 # Python
-# =========================
 __pycache__/
 *.py[cod]
-*$py.class
-*.pt
-.claude/
-# C extensions
-*.so
-
-# Distribution / packaging
-.Python
-build/
-dist/
-eggs/
+*.pyo
+*.pyd
 *.egg-info/
-*.egg
-pip-wheel-metadata/
+dist/
+build/
+.eggs/
 
-# Virtual environments
-.venv/
-venv/
-env/
-ENV/
-
-# =========================
 # Jupyter
-# =========================
 .ipynb_checkpoints/
+*.ipynb
 
-# =========================
+# Weights & Biases
+wandb/
+
+# Model checkpoints and outputs
+*.ckpt
+*.pt
+*.pth
+showers_df_evaluation/
+
+# Data files
+*.parquet
+*.root
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.npy
+*.npz
+
 # Logs
-# =========================
 *.log
+logs/
 
-# =========================
-# IDE / Editor
-# =========================
+# Editors
 .vscode/
 .idea/
 *.swp
@@ -51,70 +43,10 @@ ENV/
 *~
 
 # =========================
-# Testing
-# =========================
-.coverage
-.coverage.*
-.cache/
-pytest_cache/
-htmlcov/
-
-# =========================
-# Type checkers
-# =========================
-.mypy_cache/
-.pyre/
-.pytype/
-
-# =========================
-# PyTorch / ML artifacts
-# =========================
-*.pt
-*.pth
-*.ckpt
-checkpoints/
-wandb/
-mlruns/
-tensorboard/
-runs/
-
-# =========================
-# Data files (optional – adjust!)
-# =========================
-data/
-datasets/
-*.h5
-*.hdf5
-*.npz
-*.npy
-
-# =========================
-# Environment variables
-# =========================
-.env
-.env.*
-
-# =========================
-# Plot outputs
-# =========================
-*.png
-*.pdf
-*.svg
-*.eps
-
-# =========================
-# BSC snapshot tool backups
-# =========================
-*.bsc_*
-
-# =========================
-# Generated analysis / merge-prep docs
-# =========================
-UPSTREAM_DIFF_REPORT.md
-UPSTREAM_SYNC_CHECKLIST.md
-
-# =========================
 # Personal Obsidian notes
 # =========================
 scripts/scripts_vincent/obsidian_mlpf/
 CLAUDE.md
+
+# OS
+.DS_Store
