@@ -29,7 +29,7 @@ REPO=$PROJ/delphi_study/mlpf
 # Compute nodes have NO outbound internet -> W&B must be offline, synced later
 # from a transfer node with:  wandb sync --include-offline <dir>
 export WANDB_MODE=offline
-export WANDB_DIR=$SCR/wandb
+export WANDB_DIR=$SCR          # wandb creates $SCR/wandb/ itself — don't nest
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export SLURM_CPU_BIND=none
 
