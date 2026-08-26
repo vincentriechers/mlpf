@@ -441,14 +441,30 @@ class IPADecoder(nn.Module):
             track_mask = hit_subsystem == self.track_hit_type
             scores = scores + track_mask.float() * self.track_seed_bonus
         scores = scores.masked_fill(~key_valid, float("-inf"))
-        seed_idx = scores.topk(self.num_queries, dim=1).indices            # (B, N_q)
+        # `topk` raises "selected index k out of range" when the PADDED key
+        # width is smaller than num_queries, which is decided by the largest
+        # event in the batch — so this never fires during training (batch 8+ of
+        # ~531-hit DELPHI events gives N_k ~ 700) but does at eval, where the
+        # reference configuration is --batch-size 1 and any event with fewer
+        # than num_queries=320 hits crashes it. Clamp k and zero-pad the missing
+        # slots, which is exactly the semantics this function already documents:
+        # a padded slot gets a zero seed, leaving the learned per-slot residual
+        # (`q_init` / `t_init`) as the only signal. When N_k >= num_queries this
+        # is bit-identical to the previous code.
+        k = min(int(self.num_queries), int(N_k))
+        seed_idx = scores.topk(k, dim=1).indices                          # (B, k)
         idx_d = seed_idx.unsqueeze(-1).expand(-1, -1, D)
         idx_3 = seed_idx.unsqueeze(-1).expand(-1, -1, 3)
-        q_seed = keys.gather(1, idx_d)                                    # (B, N_q, D)
-        t_seed = x.gather(1, idx_3)                                       # (B, N_q, 3)
-        seed_valid = key_valid.gather(1, seed_idx)                        # (B, N_q)
+        q_seed = keys.gather(1, idx_d)                                    # (B, k, D)
+        t_seed = x.gather(1, idx_3)                                       # (B, k, 3)
+        seed_valid = key_valid.gather(1, seed_idx)                        # (B, k)
         q_seed = q_seed * seed_valid.unsqueeze(-1).to(q_seed.dtype)
         t_seed = t_seed * seed_valid.unsqueeze(-1).to(t_seed.dtype)
+        if k < self.num_queries:
+            pad = self.num_queries - k
+            q_seed = F.pad(q_seed, (0, 0, 0, pad))                        # (B, N_q, D)
+            t_seed = F.pad(t_seed, (0, 0, 0, pad))                        # (B, N_q, 3)
+            seed_idx = F.pad(seed_idx, (0, pad))                          # diagnostic only
         return q_seed, t_seed, seed_idx
 
     def forward(self, keys, x, key_valid, hit_subsystem=None,
