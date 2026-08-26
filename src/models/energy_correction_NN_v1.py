@@ -762,10 +762,16 @@ class EnergyCorrection():
             neutral_PID_pred, neutral_PID_true_onehot, mask_neutral = obtain_PID_neutral(dic_e_cor,pid_true_matched, self.pids_neutral, self.args, self.pid_conversion_dict)
 
         if len(self.pids_charged):
-            loss_charged_pid,acc_charged, stats= pid_loss_weighted(charged_PID_pred, charged_PID_true_onehot,e_true[dic_e_cor["charged_idx"]], mask_charged, stats, fixed, "charged")
+            loss_charged_pid,acc_charged, stats= pid_loss_weighted(charged_PID_pred, charged_PID_true_onehot,e_true[dic_e_cor["charged_idx"]], mask_charged, stats, fixed, "charged",
+                weighting=getattr(self.args, "pid_class_weighting", "none"),
+                beta=getattr(self.args, "pid_class_weighting_beta", 0.999),
+                soft_muon_cut=getattr(self.args, "pid_soft_muon_cut", 0.0))
 
         if len(self.pids_neutral):
-            loss_neutral_pid,acc_neutral, stats = pid_loss_weighted(neutral_PID_pred, neutral_PID_true_onehot,e_true, mask_neutral, stats, fixed, "neutral")
+            loss_neutral_pid,acc_neutral, stats = pid_loss_weighted(neutral_PID_pred, neutral_PID_true_onehot,e_true, mask_neutral, stats, fixed, "neutral",
+                weighting=getattr(self.args, "pid_class_weighting", "none"),
+                beta=getattr(self.args, "pid_class_weighting_beta", 0.999),
+                soft_muon_cut=getattr(self.args, "pid_soft_muon_cut", 0.0))
 
         import torch.distributed as dist
         if not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0:
@@ -869,53 +875,101 @@ def criterion_E_cor(ypred, ytrue, step, pid_neutrals, stats, frozen=False):
         return 0, stats
 
 
-def pid_loss_weighted(neutral_PID_pred, neutral_PID_true_onehot,e_true, mask_neutral, stats, frozen=False, name=""):
+def pid_loss_weighted(neutral_PID_pred, neutral_PID_true_onehot, e_true, mask_neutral,
+                      stats, frozen=False, name="", weighting="none", beta=0.999,
+                      soft_muon_cut=0.0):
+    """Cross-entropy on the PID head, optionally class-balanced.
+
+    **Both extras default to OFF, reproducing the previous behaviour exactly**
+    (plain unweighted `CrossEntropyLoss`, no candidate filtering). This module is
+    shared by DELPHI, CLD and ALLEGRO — `Gatr_pf_e_noise.py`, `mask3d_model.py`
+    and seven other GATr variants all import it — so neither may become a default.
+    `CrossEntropyLoss(weight=None)` is identical to `CrossEntropyLoss()`.
+
+    `weighting` — how to build the per-class weights from the running class
+    counts. Measured mu:e weight ratios on DELPHI's charged head
+    (`pids_charged = [0, 1, 4]`, counts e 36 499 / charged-hadron 34 299 /
+    muon 1 734):
+
+        none       1.00   uniform (previous behaviour)
+        effective  1.21   class-balanced effective number, arXiv:1901.05555
+        sqrt_inv   4.59   1/sqrt(N)
+        inv       21.05   1/N inverse frequency
+
+    `inv` is aggressive: it buys PID accuracy on muons, which carry ~1.7 % of the
+    visible energy, at the cost of the energy resolution that is the actual
+    figure of merit. `sqrt_inv` is the middle ground. Note `effective` saturates
+    at an effective count of `1/(1-beta)` = 1000 for the default beta, and every
+    DELPHI class has N >> 1000, so it is nearly inert unless beta is raised to
+    ~1 - 1/N_typical.
+
+    The counts are accumulated per process, so under DDP each rank builds its own
+    weights. They converge to the same distribution but are not identical
+    step-to-step; that is inherited behaviour, not new.
+
+    `soft_muon_cut` (GeV, 0 = off) — drop charged candidates whose TRUE class is
+    muon and whose true energy is below the cut. Below ~1.5 GeV a muon does not
+    reach the muon chambers, so the label is not learnable. The original
+    expression for this was `torch.argmax(pid_true) == 2` with no `dim`, which
+    reduces over the FLATTENED tensor to a single scalar: since pid_true is
+    one-hot it silently meant "if the batch's FIRST candidate is a muon, drop
+    EVERY candidate under the cut, of any class". Reduced over the class axis
+    here, and e_true is flattened so an (N, 1) energy cannot broadcast the mask
+    to (N, N).
+    """
     if len(neutral_PID_pred):
-        """CrossEntropyLoss with PID class balancing based on accumulated stats."""
-        # if "counts_pid" not in stats:
-        #     stats["counts_pid"+name] = {}
-        # Must have enough events
         mask_neutral = mask_neutral.bool()
-        # if neutral_PID_true_onehot.shape[0] <= 20:
-        #     return torch.nn.CrossEntropyLoss()(
-        #         neutral_PID_pred[mask_neutral],
-        #         neutral_PID_true_onehot[mask_neutral]
-        #     )
-
-
-        # Update statistics unless frozen
-        # if not frozen:
-        #     true_labels = neutral_PID_true_onehot.argmax(dim=1)
-        #     for c in true_labels.tolist():
-        #         stats["counts_pid_"+name][c] = stats["counts_pid_"+name].get(c, 0) + 1
-
-        # # Build global weight tensor
-        # num_classes = neutral_PID_true_onehot.shape[1]
-        # counts = torch.tensor([stats["counts_pid_"+name].get(i,1) for i in range(num_classes)],
-        #                     dtype=torch.float, device=neutral_PID_pred.device)
-        # counts[counts==0]=1
-        # weights = 1.0 / counts
-        # weights = weights / weights.mean()          # optional normalization
         pid_pred = neutral_PID_pred[mask_neutral]
         pid_true = neutral_PID_true_onehot[mask_neutral]
 
-        # if name =="charged":
-        #     e_true_ = e_true[mask_neutral]
-        #     mask_muons = ((torch.argmax(pid_true)==2)*(e_true_<1.5)).bool()
-            # print("mask_muons", torch.sum(mask_muons))
-            # pid_pred = pid_pred[~mask_muons]
-            # pid_true = pid_true[~mask_muons]
+        weights = None
+        if weighting and weighting != "none":
+            key = "counts_pid_" + name
+            # Created in Gatr_pf_e_noise.on_train_epoch_start, but ONLY when
+            # current_epoch == 0 — so it is absent when resuming with
+            # --resume-ckpt at a later epoch. Create it lazily rather than
+            # turning that into a KeyError hours into a run.
+            if key not in stats:
+                stats[key] = {}
+            if not frozen:
+                for c in neutral_PID_true_onehot.argmax(dim=1).tolist():
+                    stats[key][c] = stats[key].get(c, 0) + 1
+            num_classes = neutral_PID_true_onehot.shape[1]
+            counts = torch.tensor(
+                [stats[key].get(i, 1) for i in range(num_classes)],
+                dtype=torch.float, device=neutral_PID_pred.device,
+            )
+            counts[counts == 0] = 1
+            if weighting == "sqrt_inv":
+                weights = 1.0 / counts.sqrt()
+            elif weighting == "effective":
+                b = torch.tensor(float(beta), device=counts.device)
+                weights = 1.0 / ((1.0 - torch.pow(b, counts)) / (1.0 - float(beta)))
+            else:  # "inv"
+                weights = 1.0 / counts
+            weights = weights / weights.mean()
+
+        if soft_muon_cut and name == "charged":
+            e_true_ = e_true[mask_neutral]
+            mask_muons = (torch.argmax(pid_true, dim=1) == 2) & (
+                e_true_.view(-1) < float(soft_muon_cut)
+            )
+            pid_pred = pid_pred[~mask_muons]
+            pid_true = pid_true[~mask_muons]
 
         if len(pid_pred):
-            acc = torch.sum(pid_pred==pid_true)/len(pid_pred)
-            return torch.nn.CrossEntropyLoss()(
+            # NOTE: this compares raw logits to a one-hot target, so it is very
+            # nearly always 0. Pre-existing; left as-is so logged values do not
+            # silently change. It is a logged metric only, not part of the loss.
+            acc = torch.sum(pid_pred == pid_true) / len(pid_pred)
+            return torch.nn.CrossEntropyLoss(weight=weights)(
                 pid_pred,
                 pid_true
-            ), acc, stats 
+            ), acc, stats
         else:
-            return 0,0, stats
+            return 0, 0, stats
     else:
-        return 0,0, stats
+        return 0, 0, stats
 
 
 def correct_mask_neutral(pid_neutral, neural_mask):
