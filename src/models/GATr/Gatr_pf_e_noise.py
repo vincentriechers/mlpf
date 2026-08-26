@@ -169,9 +169,19 @@ class ExampleWrapper(L.LightningModule):
         else:
             result = self(batch_g, y, 1, use_gt_clusters=use_gt)
 
-        model_output = result[0].float()
-        e_cor = result[1].float()
+        # The forward returns two DIFFERENT shapes, so the (x, e_corr) unpack
+        # must happen INSIDE the non-correction branch — the sibling
+        # Gatr_pf_e.py:734 branches on args.correction first for this reason.
+        #   --correction off: (x, pred_energy_corr, 0, 0)          -> both tensors
+        #   --correction on : the 11-tuple EnergyCorrection.get_loss consumes,
+        #                     whose [1] is the dic_e_cor DICT.
+        # Unpacking unconditionally made every stage-2 run die on its first
+        # batch with `AttributeError: 'dict' object has no attribute 'float'`.
+        # Introduced by b581c7f, which took the upstream energy_correction_NN
+        # updates; stage 2 has not been runnable on this model since.
         if not self.args.correction:
+            model_output = result[0].float()
+            e_cor = result[1].float()
             with torch.autocast(device_type="cuda", enabled=False):
                 (loss, losses,) = object_condensation_loss2(
                     batch_g,
@@ -202,6 +212,8 @@ class ExampleWrapper(L.LightningModule):
                     ),
                 )
         else:
+            # Named so the unconditional `del` below still works.
+            model_output = e_cor = None
             losses = {}
         if self.args.correction:
             self.energy_correction.global_step = self.global_step
