@@ -886,6 +886,32 @@ parser.add_argument(
     "33 % of the energy. Suggested starting point for DELPHI: sqrt_inv.",
 )
 parser.add_argument(
+    "--pid-class-weighting-charged",
+    type=str,
+    default=None,
+    choices=["inv", "sqrt_inv", "effective", "none", None],
+    help="Override --pid-class-weighting for the CHARGED head only "
+    "([0,1,4] = electron / charged hadron / muon). Measured on 2500 DELPHI "
+    "events: 50.3 / 47.3 / 2.3 % of objects carrying 20.5 / 77.1 / 2.4 % of the "
+    "energy — a 21x count imbalance, but the rare class (muon) carries energy "
+    "in PROPORTION to its count, so there is little physics case for "
+    "upweighting it. Default: fall back to --pid-class-weighting.",
+)
+parser.add_argument(
+    "--pid-class-weighting-neutral",
+    type=str,
+    default=None,
+    choices=["inv", "sqrt_inv", "effective", "none", None],
+    help="Override --pid-class-weighting for the NEUTRAL head only "
+    "([2,3] = neutral hadron / photon). Measured on 2500 DELPHI events: "
+    "16.8 / 83.2 % of objects carrying 33.8 / 66.2 % of the energy — only a 5x "
+    "count imbalance, but neutral hadrons carry TWICE their share of the energy "
+    "(E/obj 2.32 vs 0.92) and are exactly where particle flow should beat a "
+    "classical reconstruction. This is the head with a real case for "
+    "upweighting; sqrt_inv gives 1.38 / 0.62. Default: fall back to "
+    "--pid-class-weighting.",
+)
+parser.add_argument(
     "--pid-soft-muon-cut",
     type=float,
     default=0.0,

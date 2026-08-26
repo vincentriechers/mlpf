@@ -28,13 +28,23 @@
 #    The knob that DOES work on this path is `--pid-class-weighting`.
 #  * `--add-track-chis` is REQUIRED: energy_correction_NN_v1.py:358 asserts it.
 #
-# Class weighting is OFF by default (`--pid-class-weighting none`), which
-# reproduces the previous behaviour exactly. To enable it:
+# Class weighting is OFF by default, reproducing the previous behaviour exactly.
+# The two heads have DIFFERENT balance, so they get separate knobs — see
+# `delphi_converter/analysis/pid_class_balance.py`, measured on 2500 events:
+#
+#   charged [0,1,4]  e 50.3% obj / 20.5% E | chg.had 47.3 / 77.1 | mu 2.3 / 2.4
+#                    21x count imbalance, but muons carry energy in PROPORTION
+#                    to their count -> weak case for reweighting
+#   neutral [2,3]    neutral hadron 16.8% obj / 33.8% E | photon 83.2 / 66.2
+#                    only 5x imbalance, but neutral hadrons carry TWICE their
+#                    share of the energy, and are exactly where particle flow
+#                    should beat DELANA -> REAL case for reweighting
+#
+# Recommended starting point:
+#     PID_WEIGHTING_NEUTRAL=sqrt_inv sbatch ...          # neutral head only
+# Everything at once (more aggressive):
 #     PID_WEIGHTING=sqrt_inv SOFT_MUON_CUT=1.5 sbatch ...
-# Measured mu:e weight ratios on DELPHI: none 1.00, effective 1.21,
-# sqrt_inv 4.59, inv 21.05. Validate against visible-mass / energy resolution,
-# NOT the PID confusion matrix — e/gamma are 62 % of objects but 33 % of the
-# energy. See bsc_training_howto.md, "Stage 2".
+# Validate against visible-energy/mass resolution, NOT the PID confusion matrix.
 # =============================================================================
 #SBATCH --job-name=delphi_stage2
 #SBATCH --output=/gpfs/scratch/ehpc1013/vriecher/slurm-logs/%x-%j.out
@@ -148,6 +158,8 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
       --PID-4-class \
       --balance-pid-classes \
       --pid-class-weighting "$PID_WEIGHTING" \
+      ${PID_WEIGHTING_CHARGED:+--pid-class-weighting-charged "$PID_WEIGHTING_CHARGED"} \
+      ${PID_WEIGHTING_NEUTRAL:+--pid-class-weighting-neutral "$PID_WEIGHTING_NEUTRAL"} \
       --pid-soft-muon-cut "$SOFT_MUON_CUT" \
       --train-batches "$TRAIN_BATCHES" \
       --use-gt-clusters

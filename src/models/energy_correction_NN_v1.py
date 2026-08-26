@@ -763,13 +763,13 @@ class EnergyCorrection():
 
         if len(self.pids_charged):
             loss_charged_pid,acc_charged, stats= pid_loss_weighted(charged_PID_pred, charged_PID_true_onehot,e_true[dic_e_cor["charged_idx"]], mask_charged, stats, fixed, "charged",
-                weighting=getattr(self.args, "pid_class_weighting", "none"),
+                weighting=_pid_weighting_for(self.args, "charged"),
                 beta=getattr(self.args, "pid_class_weighting_beta", 0.999),
                 soft_muon_cut=getattr(self.args, "pid_soft_muon_cut", 0.0))
 
         if len(self.pids_neutral):
             loss_neutral_pid,acc_neutral, stats = pid_loss_weighted(neutral_PID_pred, neutral_PID_true_onehot,e_true, mask_neutral, stats, fixed, "neutral",
-                weighting=getattr(self.args, "pid_class_weighting", "none"),
+                weighting=_pid_weighting_for(self.args, "neutral"),
                 beta=getattr(self.args, "pid_class_weighting_beta", 0.999),
                 soft_muon_cut=getattr(self.args, "pid_soft_muon_cut", 0.0))
 
@@ -873,6 +873,34 @@ def criterion_E_cor(ypred, ytrue, step, pid_neutrals, stats, frozen=False):
         return torch.mean(F.l1_loss(ypred, ytrue, reduction='none')), stats
     else:
         return 0, stats
+
+
+def _pid_weighting_for(args, name):
+    """Resolve the class-weighting mode for one PID head.
+
+    The two heads have very different balance, so one global setting is the
+    wrong granularity (measured on 2500 DELPHI events, reconstructable truth
+    objects only):
+
+        charged [0,1,4]  electron 50.3% obj / 20.5% E, charged hadron 47.3/77.1,
+                         muon 2.3/2.4          -> 21x imbalance, but the rare
+                         class carries energy in PROPORTION to its count
+        neutral [2,3]    neutral hadron 16.8% obj / 33.8% E, photon 83.2/66.2
+                         -> only 5x imbalance, but the rare class carries TWICE
+                         its share of the energy (E/obj 2.32 vs 0.92)
+
+    So the neutral head has a physics case for upweighting -- neutral hadrons
+    are exactly where particle flow is supposed to beat a classical
+    reconstruction, and getting them wrong costs visible-energy resolution
+    directly. The charged head mostly does not: upweighting muons 21x buys
+    confusion-matrix accuracy on 2.4% of the energy.
+
+    Per-head flags fall back to the global one, which falls back to "none".
+    """
+    per_head = getattr(args, "pid_class_weighting_" + name, None)
+    if per_head:
+        return per_head
+    return getattr(args, "pid_class_weighting", "none") or "none"
 
 
 def pid_loss_weighted(neutral_PID_pred, neutral_PID_true_onehot, e_true, mask_neutral,
