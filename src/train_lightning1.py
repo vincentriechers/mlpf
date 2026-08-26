@@ -17,6 +17,7 @@ from src.utils.train_utils import (
     train_load,
     test_load,
     get_samples_steps_per_epoch,
+    get_global_rank_and_world_size,
     model_setup,
     set_gpus,
 )
@@ -152,13 +153,13 @@ def main():
     # torch.autograd.set_detect_anomaly(True)  # debug only — very slow in production
 
     training_mode = not args.predict
-    # GLOBAL rank across all nodes (SLURM multi-node aware). Used for per-rank file
-    # sharding in train_load(); must be the global rank so every GPU on every node
-    # gets a DISJOINT shard. SLURM_PROCID is set by srun on multi-node; falls back to
-    # torchrun's RANK, then the single-node Lightning launcher's LOCAL_RANK.
-    args.local_rank = int(
-        os.environ.get("SLURM_PROCID", os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
-    )
+    # GLOBAL rank across all nodes. Used for per-rank file sharding in
+    # train_load() and for the DataIter names in the log, so it must be the
+    # global rank or every GPU trains on the same shard. Launcher detection
+    # lives in get_global_rank_and_world_size() — rank and world size have to be
+    # read from the SAME launcher, and reading SLURM_PROCID first (as this did)
+    # is wrong under torchrun-inside-srun, which is what the BSC scripts use.
+    args.local_rank, _ = get_global_rank_and_world_size()
     args.is_muons = True
     if args.delphi:
         # DELPHI pf_trees have a 14-feature CALO-only X_hit (X_hit[:,14] of the ILD
