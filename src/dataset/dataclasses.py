@@ -143,7 +143,24 @@ class Hits:
     
    
         if len(output["X_track"])>0:
-            chi_tracks = X_track[:,15]/ X_track[:,16]
+            # X_track[:,15] = chi2, X_track[:,16] = ndf. DELPHI has tracks with
+            # ndf == 0, so the bare division produced 0/0 = NaN for them — about
+            # 1 track in 250. A single NaN here is fatal and completely silent:
+            # it enters Mask3D's per-hit feature vector (targets.py:57), the
+            # encoder's self-attention then spreads it to EVERY hit in that
+            # event, and the loss comes out NaN. With ~29 tracks/event, nearly
+            # every batch contained one, so Attn-IPA training produced an
+            # all-NaN checkpoint at step 0 while still exiting 0 (the loss only
+            # goes to W&B, which is offline on BSC).
+            # Degenerate tracks get chi2/ndf = 0, which is what calo hits carry
+            # in this feature anyway; hit_type still distinguishes them.
+            _ndf = X_track[:, 16]
+            _ok = _ndf != 0
+            chi_tracks = torch.where(
+                _ok,
+                X_track[:, 15] / torch.where(_ok, _ndf, torch.ones_like(_ndf)),
+                torch.zeros_like(_ndf),
+            )
             chi_squared_tracks = torch.cat((p_hits, chi_tracks), dim=0)
         else:
             chi_squared_tracks = p_hits
