@@ -954,6 +954,16 @@ def criterion_E_cor(ypred, ytrue, step, pid_neutrals, stats, frozen=False):
 
 
 def pid_loss_weighted(neutral_PID_pred, neutral_PID_true_onehot,e_true, mask_neutral, stats, frozen=False, name="", weighting="inv", beta=0.999):
+    # !! THIS MODULE IS NOT ON ANY EXECUTION PATH. !!
+    # Nothing in the repo imports energy_correction_NN_test. Every model imports
+    # energy_correction_NN_v1 (GATr/Gatr_pf_e_noise.py:15, Mask3D/mask3d_model.py:32)
+    # or energy_correction_NN (Gatr_pf_e.py:31, gravnet_model.py:15). The _v1
+    # copy of pid_loss_weighted has the class weighting, the running class
+    # counts and the soft-muon mask ALL COMMENTED OUT — it is a plain
+    # unweighted CrossEntropyLoss returning a 3-tuple (loss, acc, stats), not
+    # the 2-tuple this one returns. Fixes here therefore do not affect training
+    # until they are ported to _v1.py, and porting them changes CLD/ALLEGRO
+    # stage-2 behaviour as well as DELPHI's.
     if len(neutral_PID_pred):
         """CrossEntropyLoss with PID class balancing based on accumulated stats."""
         # if "counts_pid" not in stats:
