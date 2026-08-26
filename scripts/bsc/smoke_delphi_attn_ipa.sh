@@ -104,6 +104,23 @@ echo "[smoke] host=$(hostname) gpus=$GPUS_PER_NODE list=$GPU_LIST python=$PY"
 echo "[smoke] run=$RUN_NAME track_loss_weight=$TRACK_LOSS_WEIGHT window_size=$WINDOW_SIZE opts='$NETWORK_OPTS'"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
+# --- GPU utilisation sampling -------------------------------------------------
+# Answers "is the GPU actually being used?" with numbers instead of inference.
+# Samples every GPU once a second for the life of the job; summarise afterwards
+# with scripts/bsc/gpu_util_summary.sh <csv>.
+#   util.gpu    ~100 % = compute-bound (good). Long runs of 0 % = starved by the
+#               data loader, which is exactly the failure this project hit.
+#   memory.used vs 65 GB tells you how much batch-size headroom is left.
+GPU_CSV=$SCR/slurm-logs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.gpu.csv
+if [[ "${GPU_MONITOR:-1}" == "1" ]]; then
+    nvidia-smi --query-gpu=index,utilization.gpu,memory.used \
+               --format=csv,noheader,nounits -l 1 > "$GPU_CSV" 2>/dev/null &
+    GPU_MON_PID=$!
+    trap 'kill $GPU_MON_PID 2>/dev/null' EXIT
+    echo "[gpu] sampling to $GPU_CSV"
+fi
+
+
 srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
   $PY -m torch.distributed.run \
     --nnodes="$SLURM_NNODES" \
