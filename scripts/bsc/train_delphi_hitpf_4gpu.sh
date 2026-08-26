@@ -26,6 +26,19 @@
 # the ranks are NOT reading disjoint shards — see the rank-detection note in
 # ../../delphi_study/bsc_training_howto.md.
 #
+# >>> THROUGHPUT IS DATA-BOUND, NOT COMPUTE-BOUND. <<<
+# Measured on job 45068768 (4 GPU, --batch-size 20, --num-workers 4,
+# --prefetch-factor 1): ~80 steps run at 5 steps/s, then EVERYTHING stalls for
+# ~16 s, repeating. Net 3.06 steps/s = 245 events/s, with the GPUs idle roughly
+# half the wall clock. The period is exact: 4 workers x --fetch-step 4 files x
+# 100 events = 1600 events = 80 steps at --batch-size 20, i.e. all four workers
+# exhaust their buffers at the same moment and re-read 16 parquets in lockstep.
+# `--prefetch-factor` defaults to **1**, so nothing is read ahead to cover it.
+# NUM_WORKERS=12 / PREFETCH_FACTOR=8 (now the defaults here) remove the stall
+# outright: job 45069069 holds 4.84 steps/s = 387 events/s end to end, 1.77x the
+# baseline, for ~11 s more startup. There are 20 cores per rank (80 per node / 4
+# ranks), so 12 workers is well within budget.
+#
 # Scale to production with:
 #   sbatch --qos=acc_ehpc --time=48:00:00 scripts/bsc/train_delphi_hitpf_4gpu.sh
 # =============================================================================
@@ -93,7 +106,8 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
       --data-config config_files/config_hits_track_delphi.yaml \
       --network-config src/models/wrapper/example_mode_gatr_noise.py \
       --model-prefix "$SCR/trained-models/${RUN_NAME}" \
-      --num-workers 4 \
+      --num-workers "${NUM_WORKERS:-12}" \
+      --prefetch-factor "${PREFETCH_FACTOR:-8}" \
       --gpus "$GPU_LIST" \
       --batch-size "${BATCH_SIZE:-20}" \
       --start-lr "${START_LR:-2.5e-4}" \
