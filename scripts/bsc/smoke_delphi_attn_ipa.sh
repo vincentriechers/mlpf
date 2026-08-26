@@ -94,6 +94,9 @@ MASTER_PORT=${MASTER_PORT:-29500}
 RUN_NAME=${RUN_NAME:-delphi_attn_ipa_smoke}
 TRACK_LOSS_WEIGHT=${TRACK_LOSS_WEIGHT:-3.0}
 WINDOW_SIZE=${WINDOW_SIZE:-None}     # None => xformers full-event attention
+# USE_AMP=0 turns off bf16-mixed and runs 32-true. Kept toggleable because
+# mixed precision is the first thing to bisect when a run goes non-finite.
+if [[ "${USE_AMP:-1}" == "0" ]]; then AMP_FLAG=""; else AMP_FLAG="--use-amp"; fi
 # Extra `-o key value` pairs, e.g. NETWORK_OPTS="-o num_queries 128 -o dim 128"
 NETWORK_OPTS=${NETWORK_OPTS:-}
 
@@ -101,7 +104,7 @@ mkdir -p $SCR/wandb $SCR/trained-models $SCR/slurm-logs
 
 cd "$REPO" || exit 1
 echo "[smoke] host=$(hostname) gpus=$GPUS_PER_NODE list=$GPU_LIST python=$PY"
-echo "[smoke] run=$RUN_NAME track_loss_weight=$TRACK_LOSS_WEIGHT window_size=$WINDOW_SIZE opts='$NETWORK_OPTS'"
+echo "[smoke] run=$RUN_NAME track_loss_weight=$TRACK_LOSS_WEIGHT window_size=$WINDOW_SIZE amp='${AMP_FLAG:-off}' opts='$NETWORK_OPTS'"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 # --- GPU utilisation sampling -------------------------------------------------
@@ -146,7 +149,7 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
       --optimizer adamW \
       --fetch-by-files \
       --fetch-step 4 \
-      --use-amp \
+      ${AMP_FLAG} \
       --gradient-clip-val "${GRAD_CLIP:-0.1}" \
       --log-wandb \
       --wandb-displayname "${RUN_NAME}" \

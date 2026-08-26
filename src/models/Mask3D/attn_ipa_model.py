@@ -21,6 +21,7 @@ bias — and we rely on:
      for the lack of GATr's intrinsic position channel).
 """
 import os
+import sys
 
 import lightning as L
 import torch
@@ -34,6 +35,40 @@ from src.models.Mask3D.ipa_decoder import IPADecoder
 from src.models.Mask3D.loss import mask3d_loss
 from src.models.Mask3D.matcher import Matcher
 from src.models.Mask3D.targets import build_targets
+
+
+def _report_nonfinite(model, loss, parts, step, seen):
+    """Make a diverged run fail LOUDLY at the step it happens.
+
+    This stack logs its loss only to W&B, which is offline on BSC, so a run that
+    goes NaN still prints a clean progress bar, still writes checkpoints, and
+    still exits 0. That is how a 600-step Attn-IPA smoke run came to produce a
+    checkpoint in which 411 of 412 tensors were entirely NaN, discovered only
+    when the evaluation returned an empty dataframe.
+
+    Prints the first few non-finite steps to stderr with the individual loss
+    terms, plus whether the *parameters* have already gone non-finite (which
+    tells you whether this step is the cause or just downstream of an earlier
+    one). Cheap: one `isfinite` on a scalar per step until it fires.
+    """
+    if torch.isfinite(loss):
+        return
+    seen["n"] = seen.get("n", 0) + 1
+    if seen["n"] > 5:
+        return
+    bad_parts = {k: float(v) for k, v in parts.items()
+                 if isinstance(v, (int, float)) or (torch.is_tensor(v) and v.numel() == 1)}
+    n_bad_p = sum(1 for _, q in model.named_parameters()
+                  if q.is_floating_point() and not torch.isfinite(q).all())
+    n_p = sum(1 for _, q in model.named_parameters() if q.is_floating_point())
+    print(
+        f"\n[NON-FINITE LOSS] step={step} loss={float(loss)} "
+        f"({seen['n']} of first 5 reported)\n"
+        f"    parts: {bad_parts}\n"
+        f"    params already non-finite: {n_bad_p}/{n_p}"
+        f"  -> {'this step is DOWNSTREAM of an earlier divergence' if n_bad_p else 'THIS step produced it'}",
+        file=sys.stderr, flush=True,
+    )
 
 
 class AttnIPAModel(L.LightningModule):
@@ -124,6 +159,7 @@ class AttnIPAModel(L.LightningModule):
         self.dev = dev
         self.loss_final = 0.0
         self.number_b = 0
+        self._nonfinite_seen = {}
         self.dim = dim
 
         # Input feature width: pos(3) + hit_type_oh(5 or 6) + e(1) + p(1) + chi2(1)
@@ -284,6 +320,7 @@ class AttnIPAModel(L.LightningModule):
                 if _k in parts:
                     _log[_k] = float(parts[_k])
             wandb.log(_log)
+        _report_nonfinite(self, loss, parts, batch_idx, self._nonfinite_seen)
         self.loss_final += float(loss.item() if hasattr(loss, "item") else loss)
         self.number_b += 1
         return loss
