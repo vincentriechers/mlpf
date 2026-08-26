@@ -872,15 +872,21 @@ parser.add_argument(
     type=str,
     default="inv",
     choices=["inv", "sqrt_inv", "effective", "none"],
-    help="Form of the PID class re-weighting in pid_loss_weighted (stage-2 "
-    "energy-correction + PID training). `inv` = 1/N inverse frequency "
-    "(historical default, aggressive: ~21x muon-over-electron weight at DELPHI "
-    "statistics). `sqrt_inv` = 1/sqrt(N), a milder ~4.6x. `effective` = "
-    "class-balanced effective number (arXiv:1901.05555) — see "
-    "--pid-class-weighting-beta, and note the default beta is near-inert at "
-    "DELPHI sample sizes. `none` = uniform. Validate the choice against "
-    "visible-mass / energy resolution, not PID confusion: e/gamma are 62 % of "
-    "objects but only 33 % of the energy.",
+    help="NO-OP AT PRESENT — see the warning below. Form of the PID class "
+    "re-weighting in pid_loss_weighted: `inv` = 1/N inverse frequency "
+    "(~21x muon-over-electron weight at DELPHI statistics), `sqrt_inv` = "
+    "1/sqrt(N) (~4.6x), `effective` = class-balanced effective number "
+    "(arXiv:1901.05555, see --pid-class-weighting-beta; the default beta is "
+    "near-inert at DELPHI sample sizes), `none` = uniform. "
+    "WARNING: this flag is currently wired ONLY into "
+    "src/models/energy_correction_NN_test.py, which NOTHING in the repo "
+    "imports. The module actually used by every model is "
+    "energy_correction_NN_v1.py, whose pid_loss_weighted has the class "
+    "weighting, the running class counts AND the soft-muon mask all commented "
+    "out — it is a plain unweighted CrossEntropyLoss. So passing this flag "
+    "changes nothing until someone ports the weighting into _v1.py. Doing that "
+    "would change stage-2 behaviour for CLD/ALLEGRO too, so it needs a "
+    "deliberate decision, not a default flip.",
 )
 parser.add_argument(
     "--pid-class-weighting-beta",
