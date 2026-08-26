@@ -870,23 +870,30 @@ parser.add_argument(
 parser.add_argument(
     "--pid-class-weighting",
     type=str,
-    default="inv",
+    default="none",
     choices=["inv", "sqrt_inv", "effective", "none"],
-    help="NO-OP AT PRESENT — see the warning below. Form of the PID class "
+    help="Form of the PID class "
     "re-weighting in pid_loss_weighted: `inv` = 1/N inverse frequency "
     "(~21x muon-over-electron weight at DELPHI statistics), `sqrt_inv` = "
     "1/sqrt(N) (~4.6x), `effective` = class-balanced effective number "
     "(arXiv:1901.05555, see --pid-class-weighting-beta; the default beta is "
     "near-inert at DELPHI sample sizes), `none` = uniform. "
-    "WARNING: this flag is currently wired ONLY into "
-    "src/models/energy_correction_NN_test.py, which NOTHING in the repo "
-    "imports. The module actually used by every model is "
-    "energy_correction_NN_v1.py, whose pid_loss_weighted has the class "
-    "weighting, the running class counts AND the soft-muon mask all commented "
-    "out — it is a plain unweighted CrossEntropyLoss. So passing this flag "
-    "changes nothing until someone ports the weighting into _v1.py. Doing that "
-    "would change stage-2 behaviour for CLD/ALLEGRO too, so it needs a "
-    "deliberate decision, not a default flip.",
+    "DEFAULT `none` REPRODUCES THE PREVIOUS BEHAVIOUR EXACTLY — the live module "
+    "energy_correction_NN_v1.py had the weighting commented out, and it is "
+    "shared by DELPHI, CLD and ALLEGRO, so this must be opted into per run "
+    "rather than defaulted on. Validate the choice against visible-mass / "
+    "energy resolution, not PID confusion: e/gamma are 62 % of objects but only "
+    "33 % of the energy. Suggested starting point for DELPHI: sqrt_inv.",
+)
+parser.add_argument(
+    "--pid-soft-muon-cut",
+    type=float,
+    default=0.0,
+    help="GeV. If >0, drop charged candidates whose TRUE class is muon and whose "
+    "true energy is below this, from the PID loss only — below ~1.5 GeV a muon "
+    "does not reach the muon chambers so the label is not learnable. 0 = off, "
+    "which is the previous behaviour (the cut was commented out in "
+    "energy_correction_NN_v1.py). Suggested value if enabled: 1.5.",
 )
 parser.add_argument(
     "--pid-class-weighting-beta",
