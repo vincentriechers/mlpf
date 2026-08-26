@@ -31,6 +31,38 @@ def set_gpus(args):
 
 
 
+def get_global_rank_and_world_size(gpus_list=None):
+    """GLOBAL (rank, world_size) for per-rank data sharding.
+
+    The two MUST come from the same launcher: `files[rank::world_size]` is
+    silently wrong if they disagree, and nothing downstream notices. Three
+    launchers appear across this repo's SLURM scripts:
+
+    * **torchrun / torch.distributed.run** (`scripts/bsc/*.sh`,
+      `slurm/submit_job.sh`) sets `RANK` and `WORLD_SIZE`, both already global
+      across nodes. These win whenever BOTH are present.
+    * **plain srun** with `--ntasks-per-node=N`: `SLURM_PROCID` / `SLURM_NTASKS`
+      are the global pair, and `RANK` / `WORLD_SIZE` are unset.
+    * **Lightning's own subprocess launcher**
+      (`slurm/launch_clustering_training.sh`): neither pair is reliable, so fall
+      back to `LOCAL_RANK` plus the GPU count — correct for its single-node case.
+
+    Reading SLURM first (the previous behaviour) is wrong for the torchrun
+    scripts, which run torchrun *inside* `srun --ntasks-per-node=1`: that gives
+    `SLURM_PROCID=0` and `SLURM_NTASKS=1` in EVERY torchrun child, so all four
+    local ranks resolved to shard 0 of 1 and each GPU trained on the whole
+    5000-file list instead of a disjoint 1250 (verified, job 45068409). DDP still
+    ran and the loss still fell, so this fails silently — it just wastes 3/4 of
+    the epoch and breaks the meaning of `--train-batches`.
+    """
+    env = os.environ
+    if env.get("RANK") is not None and env.get("WORLD_SIZE") is not None:
+        return int(env["RANK"]), int(env["WORLD_SIZE"])
+    if env.get("SLURM_PROCID") is not None and env.get("SLURM_NTASKS") is not None:
+        return int(env["SLURM_PROCID"]), int(env["SLURM_NTASKS"])
+    return int(env.get("LOCAL_RANK", 0)), (len(gpus_list) if gpus_list else 1)
+
+
 def get_gpu_dev(args):
     if args.gpus != "":
         accelerator = "gpu"
@@ -127,23 +159,25 @@ def to_filelist(args, mode="train"):
     if args.local_rank is not None:
         if mode == "train":
             gpus_list, _ = set_gpus(args)
-            # GLOBAL world size across ALL nodes so every rank gets a DISJOINT shard.
-            # `args.local_rank` already holds the GLOBAL rank (SLURM_PROCID / RANK).
-            # SLURM_NTASKS (srun multi-node) or WORLD_SIZE (torchrun) give the global
-            # size; fall back to the per-node GPU count for the single-node launcher.
-            world_size = (
-                int(os.environ.get("SLURM_NTASKS", os.environ.get("WORLD_SIZE", 0)))
-                or len(gpus_list)
-            )
+            # Rank AND world size from the same launcher — see
+            # get_global_rank_and_world_size. Deriving them separately is how
+            # every rank ended up on shard 0 of 1 under torchrun.
+            rank, world_size = get_global_rank_and_world_size(gpus_list)
             new_file_dict = {}
             for name, files in file_dict.items():
-                new_files = files[args.local_rank :: world_size]
+                new_files = files[rank::world_size]
                 assert len(new_files) > 0
                 np.random.shuffle(new_files)
                 new_file_dict[name] = new_files
             file_dict = new_file_dict
-            print("[shard] global_rank", args.local_rank, "world_size", world_size,
-                  "files", len(file_dict["_"]))
+            # One write, not six — four ranks printing concurrently interleaved
+            # into unreadable soup and made the shard bug much harder to see.
+            print(
+                f"[shard] global_rank {rank} world_size {world_size} "
+                f"files {len(file_dict['_'])}\n",
+                end="",
+                flush=True,
+            )
 
     if args.copy_inputs:
         import tempfile
