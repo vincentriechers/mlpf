@@ -71,8 +71,23 @@ export WANDB_MODE=offline
 export WANDB_DIR=$SCR          # wandb creates $SCR/wandb/ itself — don't nest
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export SLURM_CPU_BIND=none
+# numexpr caps at 64 threads but autodetects the ACC node's 80 cores and prints
+# a spurious `Error. nthreads cannot be larger than ...` per rank. Must be set
+# before the first import that pulls numexpr in (pandas).
+export NUMEXPR_MAX_THREADS=${NUMEXPR_MAX_THREADS:-20}
+export NUMEXPR_NUM_THREADS=${NUMEXPR_NUM_THREADS:-20}
 
+# Multi-GPU: override BOTH of these together with the sbatch --gres. NOTE that
+# sbatch's --export parses COMMAS as item separators, so GPU_LIST=0,1,2,3 cannot
+# be passed inside --export=ALL,... — export it in the calling shell instead and
+# let --export=ALL carry it through:
+#   GPUS_PER_NODE=4 GPU_LIST=0,1,2,3 sbatch --export=ALL \
+#       --gres=gpu:4 --cpus-per-task=80 scripts/bsc/smoke_delphi_attn_ipa.sh
+# GPU_LIST must list every GPU: set_gpus splits it into Trainer(devices=...).
+# Then CHECK the [shard] lines — ranks must be distinct and world_size must
+# equal the GPU count (see the sharding note in bsc_training_howto.md).
 GPUS_PER_NODE=${GPUS_PER_NODE:-1}
+GPU_LIST=${GPU_LIST:-0}
 MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 MASTER_PORT=${MASTER_PORT:-29500}
 
@@ -85,7 +100,7 @@ NETWORK_OPTS=${NETWORK_OPTS:-}
 mkdir -p $SCR/wandb $SCR/trained-models $SCR/slurm-logs
 
 cd "$REPO" || exit 1
-echo "[smoke] host=$(hostname) gpus=$GPUS_PER_NODE python=$PY"
+echo "[smoke] host=$(hostname) gpus=$GPUS_PER_NODE list=$GPU_LIST python=$PY"
 echo "[smoke] run=$RUN_NAME track_loss_weight=$TRACK_LOSS_WEIGHT window_size=$WINDOW_SIZE opts='$NETWORK_OPTS'"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
@@ -105,8 +120,9 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
       --data-config config_files/config_hits_track_delphi.yaml \
       --network-config src/models/wrapper/example_mode_attn_ipa.py \
       --model-prefix "$SCR/trained-models/${RUN_NAME}" \
-      --num-workers 4 \
-      --gpus 0 \
+      --num-workers "${NUM_WORKERS:-12}" \
+      --prefetch-factor "${PREFETCH_FACTOR:-8}" \
+      --gpus "$GPU_LIST" \
       --batch-size "${BATCH_SIZE:-8}" \
       --start-lr "${START_LR:-1e-4}" \
       --num-epochs 1 \
