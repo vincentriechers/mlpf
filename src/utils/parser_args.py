@@ -868,6 +868,29 @@ parser.add_argument(
     help="using pandora information",
 )
 parser.add_argument(
+    "--pid-class-weighting",
+    type=str,
+    default="inv",
+    choices=["inv", "sqrt_inv", "effective", "none"],
+    help="Form of the PID class re-weighting in pid_loss_weighted (stage-2 "
+    "energy-correction + PID training). `inv` = 1/N inverse frequency "
+    "(historical default, aggressive: ~21x muon-over-electron weight at DELPHI "
+    "statistics). `sqrt_inv` = 1/sqrt(N), a milder ~4.6x. `effective` = "
+    "class-balanced effective number (arXiv:1901.05555) — see "
+    "--pid-class-weighting-beta, and note the default beta is near-inert at "
+    "DELPHI sample sizes. `none` = uniform. Validate the choice against "
+    "visible-mass / energy resolution, not PID confusion: e/gamma are 62 % of "
+    "objects but only 33 % of the energy.",
+)
+parser.add_argument(
+    "--pid-class-weighting-beta",
+    type=float,
+    default=0.999,
+    help="beta for --pid-class-weighting effective. The effective number "
+    "saturates at 1/(1-beta), so beta must be ~1 - 1/N_typical to do anything; "
+    "0.999 saturates for every DELPHI class (all N >> 1000).",
+)
+parser.add_argument(
     "--gradient-clip-val",
     type=float,
     default=0.0,

@@ -785,7 +785,9 @@ class EnergyCorrection():
             neutral_PID_pred, neutral_PID_true_onehot, mask_neutral = obtain_PID_neutral(dic_e_cor,pid_true_matched, self.pids_neutral, self.args, self.pid_conversion_dict)
         
         if len(self.pids_charged):
-            loss_charged_pid, stats= pid_loss_weighted(charged_PID_pred, charged_PID_true_onehot,e_true[dic_e_cor["charged_idx"]], mask_charged, stats, fixed, "charged")
+            loss_charged_pid, stats= pid_loss_weighted(charged_PID_pred, charged_PID_true_onehot,e_true[dic_e_cor["charged_idx"]], mask_charged, stats, fixed, "charged",
+                weighting=getattr(self.args, "pid_class_weighting", "inv"),
+                beta=getattr(self.args, "pid_class_weighting_beta", 0.999))
             # if self.args.balance_pid_classes and charged_PID_true_onehot.shape[0] > 20:
             #     # Batch size must be big enough
             #     weights = charged_PID_true_onehot.sum(dim=0)
@@ -803,7 +805,9 @@ class EnergyCorrection():
             
             wandb.log({"loss_charged_pid": loss_charged_pid})
         if len(self.pids_neutral):
-            loss_neutral_pid, stats = pid_loss_weighted(neutral_PID_pred, neutral_PID_true_onehot,e_true, mask_neutral, stats, fixed, "neutral")
+            loss_neutral_pid, stats = pid_loss_weighted(neutral_PID_pred, neutral_PID_true_onehot,e_true, mask_neutral, stats, fixed, "neutral",
+                weighting=getattr(self.args, "pid_class_weighting", "inv"),
+                beta=getattr(self.args, "pid_class_weighting_beta", 0.999))
             # if self.args.balance_pid_classes and neutral_PID_true_onehot.shape[0] > 20:
             #     # Batch size must be big enough
             #     weights = neutral_PID_true_onehot.sum(dim=0)
@@ -949,7 +953,7 @@ def criterion_E_cor(ypred, ytrue, step, pid_neutrals, stats, frozen=False):
         return 0, stats
 
 
-def pid_loss_weighted(neutral_PID_pred, neutral_PID_true_onehot,e_true, mask_neutral, stats, frozen=False, name=""):
+def pid_loss_weighted(neutral_PID_pred, neutral_PID_true_onehot,e_true, mask_neutral, stats, frozen=False, name="", weighting="inv", beta=0.999):
     if len(neutral_PID_pred):
         """CrossEntropyLoss with PID class balancing based on accumulated stats."""
         # if "counts_pid" not in stats:
@@ -974,15 +978,52 @@ def pid_loss_weighted(neutral_PID_pred, neutral_PID_true_onehot,e_true, mask_neu
         counts = torch.tensor([stats["counts_pid_"+name].get(i,1) for i in range(num_classes)],
                             dtype=torch.float, device=neutral_PID_pred.device)
         counts[counts==0]=1
-        weights = 1.0 / counts
+        # Inverse-frequency (`inv`) is the historical behaviour and stays the
+        # default. It is aggressive at DELPHI statistics: over the charged head
+        # (`pids_charged = [0, 1, 4]` = e / charged-hadron / mu) the measured
+        # 2000-event counts are e 36 499, ch.had 34 299, mu 1 734, so `inv`
+        # hands muons ~21x the weight of electrons — buying PID accuracy on
+        # objects carrying ~1.7 % of the visible energy at the cost of the
+        # energy resolution that is the actual figure of merit.
+        #
+        #   form        mu:e weight ratio at the counts above
+        #   inv         21.0
+        #   sqrt_inv     4.6
+        #   effective    1.2  (beta=0.999)
+        #
+        # NOTE on `effective` (Cui et al. 2019, arXiv:1901.05555): the effective
+        # number (1-beta^N)/(1-beta) saturates at 1/(1-beta), i.e. 1000 for
+        # beta=0.999. Every DELPHI class here has N >> 1000, so beta=0.999 is
+        # effectively NO re-weighting at all. To use this form meaningfully pick
+        # beta ~ 1 - 1/N_typical (~0.99997 for N~3e4), otherwise prefer
+        # `sqrt_inv`.
+        if weighting == "sqrt_inv":
+            weights = 1.0 / counts.sqrt()
+        elif weighting == "effective":
+            eff_num = (1.0 - torch.pow(torch.tensor(beta, device=counts.device), counts)) / (1.0 - beta)
+            weights = 1.0 / eff_num
+        elif weighting == "none":
+            weights = torch.ones_like(counts)
+        else:
+            weights = 1.0 / counts
         weights = weights / weights.mean()          # optional normalization
         pid_pred = neutral_PID_pred[mask_neutral]
         pid_true = neutral_PID_true_onehot[mask_neutral]
 
         if name =="charged":
             e_true_ = e_true[mask_neutral]
-            mask_muons = ((torch.argmax(pid_true)==2)*(e_true_<1.5)).bool()
-            print("mask_muons", torch.sum(mask_muons))
+            # Drop soft (E < 1.5 GeV) charged candidates whose TRUE class is muon
+            # (index 2): below ~1.5 GeV a muon does not reach the muon chambers,
+            # so the label is not learnable and only adds noise to the PID head.
+            #
+            # `torch.argmax(pid_true)` with no `dim` reduces over the FLATTENED
+            # tensor and returns a single scalar, so the old expression was not
+            # per-row: since pid_true is one-hot, it collapsed to "is the batch's
+            # FIRST candidate a muon", and if so dropped EVERY candidate under
+            # 1.5 GeV of any class (and none at all otherwise). Reduce over the
+            # class axis instead. `.view(-1)` guards against e_true arriving as
+            # (N, 1) rather than (N,), which would broadcast to an (N, N) mask.
+            mask_muons = (torch.argmax(pid_true, dim=1) == 2) & (e_true_.view(-1) < 1.5)
             pid_pred = pid_pred[~mask_muons]
             pid_true = pid_true[~mask_muons]
 
