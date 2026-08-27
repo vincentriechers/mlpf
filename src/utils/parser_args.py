@@ -868,6 +868,18 @@ parser.add_argument(
     help="using pandora information",
 )
 parser.add_argument(
+    "--seed",
+    type=int,
+    default=None,
+    help="If set, call lightning.seed_everything(seed, workers=True) before "
+    "anything else, making weight init, the per-rank file shuffle in "
+    "to_filelist and the DataLoader worker seeds reproducible. Default None = "
+    "unseeded, i.e. unchanged behaviour. SET THIS FOR ANY A/B COMPARISON "
+    "(e.g. --pid-class-weighting on vs off): without it the two arms differ by "
+    "RNG as well as by the thing under test, and a small difference between "
+    "them cannot be attributed to the change.",
+)
+parser.add_argument(
     "--pid-class-weighting",
     type=str,
     default="none",

@@ -152,6 +152,17 @@ def main():
     args = parser.parse_args()
     # torch.autograd.set_detect_anomaly(True)  # debug only — very slow in production
 
+    # Opt-in determinism. Default None = unseeded, i.e. exactly the previous
+    # behaviour. Without this an A/B comparison (e.g. --pid-class-weighting on
+    # vs off) differs by RNG as well as by the thing under test — weight init,
+    # per-rank file shuffling in to_filelist, and the DataIter seeds all vary —
+    # so a small difference between two arms cannot be attributed to the change.
+    # `workers=True` also seeds the DataLoader workers, which is where the file
+    # shuffle actually happens.
+    if getattr(args, "seed", None) is not None:
+        L.seed_everything(int(args.seed), workers=True)
+        print(f"[seed] seed_everything({args.seed}, workers=True)")
+
     training_mode = not args.predict
     # GLOBAL rank across all nodes. Used for per-rank file sharding in
     # train_load() and for the DataIter names in the log, so it must be the
