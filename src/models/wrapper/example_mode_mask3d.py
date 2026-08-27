@@ -52,10 +52,22 @@ _ATTN_IPA_LOSS_DEFAULTS = {
 class GraphTransformerNetWrapper(torch.nn.Module):
     def __init__(self, args, dev, **kwargs):
         super().__init__()
-        # IPA decoder + AttnIPABackbone == the attn_ipa architecture. Left as a
-        # setdefault rather than forced, so `-o use_ipa_decoder False` still
-        # gives the plain Mask3D (MaskFormerDecoder) variant from this config.
-        kwargs.setdefault("use_ipa_decoder", True)
+        # DEFAULT IS PLAIN MASK3D (MaskFormerDecoder, static learned queries).
+        #
+        # This used to default to use_ipa_decoder=True for checkpoint
+        # compatibility with attn_ipa_model training, which made a file called
+        # "example_mode_mask3d" build Attn-IPA — actively misleading. The three
+        # variants are different models, not spellings of one:
+        #
+        #   Mask3D    encoder + MaskFormerDecoder, queries STATIC/learned
+        #   GATr-IPA  GATr backbone + IPADecoder   (docstring: "Replaces
+        #             Mask3D's encoder + MaskFormer decoder with ...")
+        #   Attn-IPA  attention backbone + IPADecoder, variant C, queries
+        #             seeded from the top-N encoder tokens by L2 norm
+        #
+        # To evaluate an attn_ipa_model checkpoint through this wrapper, pass
+        # `-o use_ipa_decoder True` (plus the same -o options used at training).
+        kwargs.setdefault("use_ipa_decoder", False)
         for k, v in _ATTN_IPA_LOSS_DEFAULTS.items():
             kwargs.setdefault(k, v)
         self.mod = Mask3DModel(args, dev, **kwargs)
