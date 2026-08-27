@@ -18,6 +18,13 @@
 #   --train-batches        Does double duty: Trainer.limit_train_batches AND
 #                          OneCycleLR total_steps (= num_epochs * train_batches,
 #                          attn_ipa_model.py:371). Never leave it implicit.
+#   --num-epochs           Reads NUM_EPOCHS. This was hardcoded to 1, so job
+#                          45073180 was launched with NUM_EPOCHS=16 and quietly
+#                          trained ONE epoch — exit 0, zero errors, a complete
+#                          OneCycle schedule over 1914 steps instead of 30 624.
+#                          Nothing looked wrong; it was simply 1/16 of the
+#                          intended training. Check the `[smoke]` echo below
+#                          against what you exported.
 #   -o track_loss_weight   The Mask3D analogue of --beta-noise-weight-track.
 #                          loss.py:411-423 turns it into a per-hit weight of
 #                          `track_loss_weight` on hits with hit_type ==
@@ -104,7 +111,7 @@ mkdir -p $SCR/wandb $SCR/trained-models $SCR/slurm-logs
 
 cd "$REPO" || exit 1
 echo "[smoke] host=$(hostname) gpus=$GPUS_PER_NODE list=$GPU_LIST python=$PY"
-echo "[smoke] run=$RUN_NAME track_loss_weight=$TRACK_LOSS_WEIGHT window_size=$WINDOW_SIZE amp='${AMP_FLAG:-off}' opts='$NETWORK_OPTS'"
+echo "[smoke] run=$RUN_NAME epochs=${NUM_EPOCHS:-1} train_batches=${TRAIN_BATCHES:-50} batch=${BATCH_SIZE:-8} track_loss_weight=$TRACK_LOSS_WEIGHT window_size=$WINDOW_SIZE amp='${AMP_FLAG:-off}' opts='$NETWORK_OPTS'"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 # --- GPU utilisation sampling -------------------------------------------------
@@ -145,7 +152,7 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
       --gpus "$GPU_LIST" \
       --batch-size "${BATCH_SIZE:-8}" \
       --start-lr "${START_LR:-1e-4}" \
-      --num-epochs 1 \
+      --num-epochs "${NUM_EPOCHS:-1}" \
       --optimizer adamW \
       --fetch-by-files \
       --fetch-step 4 \
