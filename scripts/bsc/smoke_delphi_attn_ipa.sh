@@ -162,4 +162,10 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
       -o window_size "$WINDOW_SIZE" \
       $NETWORK_OPTS
 
-echo "[smoke] exit=$?"
+RC=$?
+# Capture BEFORE the echo, and exit with it. Without the explicit
+# `exit $RC` the script ends on a successful `echo`, so SLURM records
+# the job as COMPLETED even when training died — job 45080197 failed
+# on its first batch and still showed State=COMPLETED, ExitCode=0:0.
+echo "[smoke] exit=$RC"
+exit $RC
