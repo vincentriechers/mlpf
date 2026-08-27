@@ -82,4 +82,10 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
       --beta-noise-weight-track "${BETA_NOISE_WEIGHT_TRACK:-0.05}" \
       --train-batches "${TRAIN_BATCHES:-50}"
 
-echo "[smoke] exit=$?"
+RC=$?
+# Capture BEFORE the echo, and exit with it. Without the explicit
+# `exit $RC` the script ends on a successful `echo`, so SLURM records
+# the job as COMPLETED even when training died — job 45080197 failed
+# on its first batch and still showed State=COMPLETED, ExitCode=0:0.
+echo "[smoke] exit=$RC"
+exit $RC

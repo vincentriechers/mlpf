@@ -22,6 +22,7 @@ import numpy as np
 from gatr import GATr, SelfAttentionConfig, MLPConfig
 import pickle
 from copy import deepcopy
+import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -868,8 +869,15 @@ class EnergyCorrection():
 
 
 def criterion_E_cor(ypred, ytrue, step, pid_neutrals, stats, frozen=False):
-    if len(ypred)>0:
-        stats = 0
+    # `stats` is the model's running-statistics DICT (self.stats), threaded
+    # through get_loss and on to pid_loss_weighted. This used to do `stats = 0`
+    # before returning, which silently replaced that dict with an int on every
+    # step where ypred was non-empty — i.e. always. It went unnoticed because
+    # the only consumer (the class-weighting block in pid_loss_weighted) was
+    # commented out; the moment it was enabled, the run died on batch one with
+    # `TypeError: argument of type 'int' is not iterable` (job 45080197).
+    # Nothing in this function uses stats, so pass it straight through.
+    if len(ypred) > 0:
         return torch.mean(F.l1_loss(ypred, ytrue, reduction='none')), stats
     else:
         return 0, stats
@@ -957,6 +965,22 @@ def pid_loss_weighted(neutral_PID_pred, neutral_PID_true_onehot, e_true, mask_ne
             # current_epoch == 0 — so it is absent when resuming with
             # --resume-ckpt at a later epoch. Create it lazily rather than
             # turning that into a KeyError hours into a run.
+            #
+            # And tolerate `stats` not being a dict at all: it is threaded
+            # through several helpers, any one of which could rebind it (see
+            # the criterion_E_cor note above). Degrade to per-batch counts and
+            # say so once, rather than killing a multi-hour job.
+            if not isinstance(stats, dict):
+                if not getattr(pid_loss_weighted, "_warned_stats", False):
+                    pid_loss_weighted._warned_stats = True
+                    print(
+                        f"[pid_loss_weighted] WARNING: `stats` is "
+                        f"{type(stats).__name__}, not dict — class counts cannot "
+                        f"persist across steps, falling back to per-batch counts. "
+                        f"Weights will be noisier than intended.",
+                        file=sys.stderr, flush=True,
+                    )
+                stats = {}
             if key not in stats:
                 stats[key] = {}
             if not frozen:

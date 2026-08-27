@@ -96,7 +96,7 @@ mkdir -p "$SCR/wandb" "$SCR/slurm-logs" "$SCR/trained-models/${RUN_NAME}"
 cd "$REPO" || exit 1
 echo "[stage2] host=$(hostname) gpus=$GPUS_PER_NODE list=$GPU_LIST"
 echo "[stage2] batch=$BATCH_SIZE x $GPUS_PER_NODE = $EFF_BATCH   start_lr=$START_LR"
-echo "[stage2] pid_class_weighting=$PID_WEIGHTING  soft_muon_cut=$SOFT_MUON_CUT"
+echo "[stage2] pid_class_weighting=$PID_WEIGHTING charged=${PID_WEIGHTING_CHARGED:-<global>} neutral=${PID_WEIGHTING_NEUTRAL:-<global>}  soft_muon_cut=$SOFT_MUON_CUT"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
 
 GPU_CSV=$SCR/slurm-logs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.gpu.csv
@@ -164,4 +164,10 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
       --train-batches "$TRAIN_BATCHES" \
       --use-gt-clusters
 
-echo "[stage2] exit=$?"
+RC=$?
+# Capture BEFORE the echo, and exit with it. Without the explicit
+# `exit $RC` the script ends on a successful `echo`, so SLURM records
+# the job as COMPLETED even when training died — job 45080197 failed
+# on its first batch and still showed State=COMPLETED, ExitCode=0:0.
+echo "[stage2] exit=$RC"
+exit $RC

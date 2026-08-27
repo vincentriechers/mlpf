@@ -130,5 +130,11 @@ $PY -m src.train_lightning1 \
     "${EXTRA[@]}" \
     "${NETOPTS[@]}"
 
-echo "[eval] exit=$?"
+RC=$?
+# Capture BEFORE the echo, and exit with it. Without the explicit
+# `exit $RC` the script ends on a successful `echo`, so SLURM records
+# the job as COMPLETED even when training died — job 45080197 failed
+# on its first batch and still showed State=COMPLETED, ExitCode=0:0.
+echo "[eval] exit=$RC"
 ls -la "$MODEL_DIR/showers_df_evaluation/" 2>/dev/null | tail -5
+exit $RC
