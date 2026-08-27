@@ -157,6 +157,7 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
       --restrict_PID_charge \
       --PID-4-class \
       --balance-pid-classes \
+      ${SEED:+--seed "$SEED"} \
       --pid-class-weighting "$PID_WEIGHTING" \
       ${PID_WEIGHTING_CHARGED:+--pid-class-weighting-charged "$PID_WEIGHTING_CHARGED"} \
       ${PID_WEIGHTING_NEUTRAL:+--pid-class-weighting-neutral "$PID_WEIGHTING_NEUTRAL"} \
