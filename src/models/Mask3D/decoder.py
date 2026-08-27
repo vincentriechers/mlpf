@@ -13,6 +13,7 @@ Outputs at every layer are kept for deep supervision.
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from src.models.Mask3D.attention import MultiHeadAttention, FFN
 from src.models.Mask3D.tasks import ObjectHitMaskTask, ObjectClassificationTask
@@ -435,10 +436,21 @@ class MaskFormerDecoder(nn.Module):
         # picks them only as a last resort (never under N_q ≤ min seq_len).
         scores = scores.masked_fill(~key_valid, float("-inf"))
         # Stable topk: return both indices and values; ascending=False.
-        topk = scores.topk(self.num_queries, dim=1)
-        seed_idx = topk.indices                                   # (B, N_q)
+        #
+        # k is CLAMPED to the padded key width. The note below handles padded
+        # SLOTS (N_k >= num_queries, some slots invalid); it does not handle the
+        # padded WIDTH itself being smaller than num_queries, which is decided
+        # by the largest event in the batch. So this never fires at training
+        # batch sizes but does at eval, where the reference configuration is
+        # --batch-size 1 and any event with fewer hits than num_queries raises
+        # `RuntimeError: selected index k out of range`. Identical bug and fix
+        # to ipa_decoder._seed_queries_from_encoder (commit bfe748c); this is
+        # the MaskFormerDecoder copy, missed at the time.
+        k = min(int(self.num_queries), int(keys.size(1)))
+        topk = scores.topk(k, dim=1)
+        seed_idx = topk.indices                                   # (B, k)
         idx_exp = seed_idx.unsqueeze(-1).expand(-1, -1, keys.size(-1))
-        seed = keys.gather(1, idx_exp)                            # (B, N_q, D)
+        seed = keys.gather(1, idx_exp)                            # (B, k, D)
         # If an event has fewer valid hits than `num_queries`, the spillover
         # slots picked padded positions (their score was -inf, but topk
         # still has to pick *something* for those slots). Replace those
@@ -446,8 +458,14 @@ class MaskFormerDecoder(nn.Module):
         # the slot stays usable, just without an encoder-derived prior.
         # Avoids crashing on the rare small event without sacrificing the
         # encoder-seeded prior on the rest.
-        seed_valid = key_valid.gather(1, seed_idx)                # (B, N_q)
+        seed_valid = key_valid.gather(1, seed_idx)                # (B, k)
         seed = seed * seed_valid.unsqueeze(-1).to(seed.dtype)
+        if k < self.num_queries:
+            # Zero-pad the missing slots, which is exactly the semantics above:
+            # a slot with a zero seed becomes just `query_bias`.
+            pad = self.num_queries - k
+            seed = F.pad(seed, (0, 0, 0, pad))                    # (B, N_q, D)
+            seed_idx = F.pad(seed_idx, (0, pad))                  # diagnostic only
         q = seed + self.query_bias.unsqueeze(0)                   # (B, N_q, D)
         return q, seed_idx
 
