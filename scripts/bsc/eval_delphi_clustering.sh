@@ -71,8 +71,16 @@ case "$MODEL" in
     # Mask3D uses Hungarian matching, not object condensation. adamW is the only
     # optimizer attn_ipa/mask3d accept for construction.
     EXTRA=(--optimizer adamW)
-    # MUST mirror the training -o options (see trap 1 above)
-    NETOPTS=(-o window_size None -o track_loss_weight "${TRACK_LOSS_WEIGHT:-3.0}")
+    # MUST mirror the training -o options (see trap 1 above). num_queries and
+    # use_ipa_decoder change PARAMETER SHAPES, so a mismatch is not cosmetic:
+    # load_test_model loads with strict=False and would silently keep only the
+    # shape-matching keys, evaluating a half-random model. Defaults here match
+    # the plain-Mask3D job; pass USE_IPA_DECODER=True to evaluate an
+    # attn_ipa_model checkpoint.
+    NETOPTS=(-o window_size None
+             -o track_loss_weight "${TRACK_LOSS_WEIGHT:-3.0}"
+             -o num_queries "${NUM_QUERIES:-320}"
+             -o use_ipa_decoder "${USE_IPA_DECODER:-False}")
     ;;
   *) echo "MODEL must be hitpf or mask3d, got '$MODEL'" >&2; exit 2 ;;
 esac
