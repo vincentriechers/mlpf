@@ -420,7 +420,7 @@ class EnergyCorrection():
             args=self.args
         )
 
-    def clustering_and_global_features(self, g, x, y, add_fakes=True):
+    def clustering_and_global_features(self, g, x, y, add_fakes=True, precomputed_labels=None):
         time_matching_start = time()
         # Match graphs
         (
@@ -441,6 +441,7 @@ class EnergyCorrection():
             add_fakes=add_fakes,
             truth_tracks=self.args.truth_tracking,
             fix_clusters_class=getattr(self.main_model, '_fix_clusters_class', None),
+            precomputed_labels=precomputed_labels,
         )
         time_matching_end = time()
         # wandb.log({"time_clustering_matching": time_matching_end - time_matching_start})
@@ -535,7 +536,21 @@ class EnergyCorrection():
             fakes_idx
         )
 
-    def forward_correction(self, g, x, y, return_train):
+    def forward_correction(self, g, x, y, return_train, precomputed_labels=None):
+        """`precomputed_labels`: optional flat (total_hits,) int64 cluster ids
+        in graph node order, threaded straight to
+        obtain_clustering_for_matched_showers so the EC pipeline does not
+        redundantly re-cluster. Used by the Mask3D path, whose labels come from
+        the mask head's argmax rather than from DPC over OC coordinates
+        (mask3d_model.py:751).
+
+        The parameter was missing here while mask3d_model already passed it, so
+        every Mask3D stage-2 run died with
+        `TypeError: forward_correction() got an unexpected keyword argument
+        'precomputed_labels'` (job 45146097). obtain_clustering_for_matched_showers
+        has supported it all along (utils_training.py:103) — only these two hops
+        were unplumbed. Default None keeps the HitPF/GATr path unchanged.
+        """
         time_matching_start = time()
         (
             graphs_new,
@@ -556,7 +571,10 @@ class EnergyCorrection():
             number_of_fakes,
             extra_features,
             fakes_idx
-        ) = self.clustering_and_global_features(g, x, y, add_fakes=self.args.predict)
+        ) = self.clustering_and_global_features(
+            g, x, y, add_fakes=self.args.predict,
+            precomputed_labels=precomputed_labels,
+        )
         charged_energies = self.model_charged.charged_prediction(
             graphs_new, charged_idx, features_charged_no_nan
         )

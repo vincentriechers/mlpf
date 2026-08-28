@@ -839,7 +839,15 @@ class ExampleWrapper(L.LightningModule):
                           f"{self.global_step}: {e}")
         else:
             # EC training path (mirrors GATr model)
-            result = self(batch_g, y, batch_idx, return_train=True)
+            #
+            # NOTE: this used to pass return_train=True, but that selects
+            # forward_correction's 8-tuple branch while get_loss below unpacks
+            # ELEVEN values — `ValueError: not enough values to unpack
+            # (expected 11, got 8)` on the first batch (job 45146645). The GATr
+            # model gets this right by simply not passing the flag
+            # (Gatr_pf_e_noise.training_step), so return_train stays False and
+            # forward_correction returns the 11-tuple get_loss consumes.
+            result = self(batch_g, y, batch_idx)
             self.energy_correction.global_step = self.global_step
             fixed = self.current_epoch != 0
             (
