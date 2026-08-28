@@ -26,15 +26,38 @@ class FreezeClustering(BaseFinetuning):
         # freeze any module you want
         # Here, we are freezing `feature_extractor`
 
-        self.freeze(pl_module.ScaledGooeyBatchNorm2_1)
-        # self.freeze(pl_module.Dense_1)
-        self.freeze(pl_module.gatr)
-        # self.freeze(pl_module.postgn_dense)
-        # self.freeze(pl_module.ScaledGooeyBatchNorm2_2)
-        self.freeze(pl_module.clustering)
-        self.freeze(pl_module.beta)
-
-        print("CLUSTERING HAS BEEN FROOOZEN")
+        # The clustering stack has DIFFERENT module names per architecture, so
+        # freeze whichever exist instead of hardcoding one model's:
+        #
+        #   GATr / HitPF   ScaledGooeyBatchNorm2_1, gatr, clustering, beta
+        #   Mask3D/AttnIPA input_net, encoder, decoder
+        #
+        # The hardcoded GATr list made every Mask3D stage-2 run die on startup
+        # with `AttributeError: 'ExampleWrapper' object has no attribute
+        # 'ScaledGooeyBatchNorm2_1'` (job 45144848) — --correction itself is
+        # supported by mask3d_model (it builds an ECAdapter), it was only this
+        # callback that assumed GATr.
+        CLUSTERING_MODULES = (
+            "ScaledGooeyBatchNorm2_1", "gatr", "clustering", "beta",   # GATr
+            "input_net", "encoder", "decoder",                         # Mask3D
+        )
+        frozen = []
+        for name in CLUSTERING_MODULES:
+            mod = getattr(pl_module, name, None)
+            if isinstance(mod, torch.nn.Module):
+                self.freeze(mod)
+                frozen.append(name)
+        if not frozen:
+            # Never let --freeze-clustering silently do nothing: a stage-2 run
+            # that trains the clustering backbone alongside the EC heads is not
+            # the recipe, and would look perfectly healthy in the logs.
+            raise RuntimeError(
+                "--freeze-clustering: no known clustering module found on "
+                f"{type(pl_module).__name__}. Tried {CLUSTERING_MODULES}. Add "
+                "this architecture's module names to CLUSTERING_MODULES in "
+                "src/layers/utils_training.py:FreezeClustering."
+            )
+        print("CLUSTERING HAS BEEN FROZEN:", ", ".join(frozen))
 
     def finetune_function(self, pl_module, current_epoch, optimizer):
         print("Not finetunning")

@@ -91,10 +91,25 @@ NUM_EPOCHS=${NUM_EPOCHS:-2}
 TRAIN_BATCHES=${TRAIN_BATCHES:-2000}
 PID_WEIGHTING=${PID_WEIGHTING:-none}
 SOFT_MUON_CUT=${SOFT_MUON_CUT:-0.0}
+# Which model gets the EC/PID heads. Default = HitPF (GATr). For Mask3D pass
+#   NETWORK_CONFIG=src/models/wrapper/example_mode_mask3d.py \
+#   NETWORK_OPTS="-o use_ipa_decoder False -o num_queries 320 -o window_size None"
+# The comparison needs ONE EC PER MODEL: the heads sit inside the model and are
+# trained on its own backbone features, then grafted onto its clustering at full
+# evaluation. A HitPF EC is not reusable for Mask3D.
+NETWORK_CONFIG=${NETWORK_CONFIG:-src/models/wrapper/example_mode_gatr_noise.py}
+NETWORK_OPTS=${NETWORK_OPTS:-}
+# HitPF/GATr IGNORES --optimizer entirely — Gatr_pf_e_noise.configure_optimizers
+# hardcodes torch.optim.Adam — so `ranger` there is a no-op kept for fidelity
+# with the UNIGE recipe. mask3d_model DOES read it, and raises because
+# `pytorch_optimizer` is not installed in the BSC env. So Mask3D stage-2 needs
+# OPTIMIZER=adamW.
+OPTIMIZER=${OPTIMIZER:-ranger}
 
 mkdir -p "$SCR/wandb" "$SCR/slurm-logs" "$SCR/trained-models/${RUN_NAME}"
 cd "$REPO" || exit 1
 echo "[stage2] host=$(hostname) gpus=$GPUS_PER_NODE list=$GPU_LIST"
+echo "[stage2] network-config=$NETWORK_CONFIG optimizer=$OPTIMIZER opts='$NETWORK_OPTS'"
 echo "[stage2] batch=$BATCH_SIZE x $GPUS_PER_NODE = $EFF_BATCH   start_lr=$START_LR"
 echo "[stage2] pid_class_weighting=$PID_WEIGHTING charged=${PID_WEIGHTING_CHARGED:-<global>} neutral=${PID_WEIGHTING_NEUTRAL:-<global>}  soft_muon_cut=$SOFT_MUON_CUT"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
@@ -122,7 +137,7 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
       --delphi \
       --data-train "$SCR/data/500k_delana/digitized/" \
       --data-config config_files/config_hits_track_delphi.yaml \
-      --network-config src/models/wrapper/example_mode_gatr_noise.py \
+      --network-config "$NETWORK_CONFIG" \
       --model-prefix "$SCR/trained-models/${RUN_NAME}" \
       -clust \
       -clust_dim 3 \
@@ -132,7 +147,7 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
       --batch-size "$BATCH_SIZE" \
       --start-lr "$START_LR" \
       --num-epochs "$NUM_EPOCHS" \
-      --optimizer ranger \
+      --optimizer "$OPTIMIZER" \
       --fetch-step 4 \
       --fetch-by-files \
       --condensation \
@@ -163,7 +178,8 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
       ${PID_WEIGHTING_NEUTRAL:+--pid-class-weighting-neutral "$PID_WEIGHTING_NEUTRAL"} \
       --pid-soft-muon-cut "$SOFT_MUON_CUT" \
       --train-batches "$TRAIN_BATCHES" \
-      --use-gt-clusters
+      --use-gt-clusters \
+      $NETWORK_OPTS
 
 RC=$?
 # Capture BEFORE the echo, and exit with it. Without the explicit
