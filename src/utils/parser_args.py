@@ -692,6 +692,21 @@ parser.add_argument(
 )
 
 parser.add_argument(
+    "--eval-cls-threshold",
+    type=float,
+    default=0.5,
+    help=(
+        "Mask3D eval/--predict only. sigmoid(cls) cut for a QUERY to count as a "
+        "real object in labels_from_masks. Its two siblings below are already "
+        "CLI-sweepable; this one was hardcoded at the function default and so "
+        "was the only Mask3D inference knob that could not be scanned. It does "
+        "a lot of work on DELPHI: num_queries is 320 against ~56 truth objects "
+        "per event, so the class head has to reject ~264 queries every event, "
+        "and the measured fake rate is 22.5%. Raise it to admit fewer queries. "
+        "Default 0.5 (unchanged behaviour)."
+    ),
+)
+parser.add_argument(
     "--eval-mask-threshold",
     type=float,
     default=0.5,

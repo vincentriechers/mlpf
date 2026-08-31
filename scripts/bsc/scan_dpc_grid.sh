@@ -57,24 +57,52 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export NUMEXPR_MAX_THREADS=20 NUMEXPR_NUM_THREADS=20
 
 MODE=${MODE:-clust}
+MODEL=${MODEL:-hitpf}
+# The EC/PID flag block is identical for both models; only the network config,
+# the checkpoints and the model-specific clustering flags differ. Mirrors
+# scripts/bsc/eval_delphi_full.sh exactly -- check the two `loaded ... keys`
+# lines in the log against a reference run before trusting any number.
+EC_ARGS=(--correction --ec-model gatr-neutrals --regress-pos --regress-unit-p
+         --separate-PID-GATr --n-layers-PID-head 3
+         --restrict_PID_charge --PID-4-class --add-track-chis)
+case "$MODEL" in
+  hitpf)
+    NETCFG=src/models/wrapper/example_mode_gatr_noise.py
+    DEF_CLUST=$SCR/trained-models/hitpf_stage1/_epoch=16_step=104000.ckpt
+    DEF_EC=$SCR/trained-models/hitpf_stage2_bal/_epoch=1_step=12000.ckpt
+    DEF_FULLDIR=$SCR/trained-models/fulleval_hitpf
+    DEF_CLUSTDIR=$SCR/trained-models/hitpf_stage1
+    FULL_FLAGS=(--condensation -clust -clust_dim 3 --qmin 1 --use-average-cc-pos 0.99
+                --optimizer ranger)
+    CLUST_FLAGS=(--condensation -clust -clust_dim 3 --qmin 3 --use-average-cc-pos 0.98
+                 --optimizer ranger)
+    NETOPTS=() ;;
+  mask3d)
+    NETCFG=src/models/wrapper/example_mode_mask3d.py
+    DEF_CLUST=$SCR/trained-models/mask3d_stage1/_epoch=15_step=30500.ckpt
+    DEF_EC=$SCR/trained-models/mask3d_stage2_bal/_epoch=1_step=12000.ckpt
+    DEF_FULLDIR=$SCR/trained-models/fulleval_mask3d
+    DEF_CLUSTDIR=$SCR/trained-models/mask3d_stage1
+    # --mask3d-use-mask-labels is MANDATORY: without it the EC pipeline runs its
+    # own DPC clustering while inference uses labels_from_masks, the two
+    # disagree on the cluster count, and generate_showers_data_frame dies.
+    FULL_FLAGS=(--optimizer adamW --mask3d-use-mask-labels)
+    CLUST_FLAGS=(--optimizer adamW)
+    NETOPTS=(-o use_ipa_decoder False -o num_queries "${NUM_QUERIES:-320}"
+             -o window_size None) ;;
+  *) echo "MODEL must be hitpf or mask3d, got '$MODEL'" >&2; exit 2 ;;
+esac
 if [[ "$MODE" == "full" ]]; then
-    MODEL_DIR=${MODEL_DIR:-$SCR/trained-models/fulleval_hitpf}
-    EC_CKPT=${EC_CKPT:-$SCR/trained-models/hitpf_stage2_bal/_epoch=1_step=12000.ckpt}
-    CKPT=${CKPT:-$SCR/trained-models/hitpf_stage1/_epoch=16_step=104000.ckpt}
+    MODEL_DIR=${MODEL_DIR:-$DEF_FULLDIR}
+    EC_CKPT=${EC_CKPT:-$DEF_EC}
+    CKPT=${CKPT:-$DEF_CLUST}
     [[ -f "$EC_CKPT" ]] || { echo "no EC checkpoint at $EC_CKPT" >&2; exit 2; }
-    # must mirror scripts/bsc/eval_delphi_full.sh exactly
     MODE_ARGS=(--load-model-weights "$EC_CKPT" --load-model-weights-clustering "$CKPT"
-               --correction --ec-model gatr-neutrals --regress-pos --regress-unit-p
-               --separate-PID-GATr --n-layers-PID-head 3
-               --restrict_PID_charge --PID-4-class --add-track-chis
-               --condensation -clust -clust_dim 3 --qmin 1 --use-average-cc-pos 0.99
-               --optimizer ranger)
+               "${EC_ARGS[@]}" "${FULL_FLAGS[@]}")
 else
-    MODEL_DIR=${MODEL_DIR:-$SCR/trained-models/hitpf_stage1}
-    CKPT=${CKPT:-$MODEL_DIR/_epoch=16_step=104000.ckpt}
-    MODE_ARGS=(--load-model-weights "$CKPT"
-               --condensation -clust -clust_dim 3 --qmin 3 --use-average-cc-pos 0.98
-               --optimizer ranger)
+    MODEL_DIR=${MODEL_DIR:-$DEF_CLUSTDIR}
+    CKPT=${CKPT:-$DEF_CLUST}
+    MODE_ARGS=(--load-model-weights "$CKPT" "${CLUST_FLAGS[@]}")
 fi
 TAG=${TAG:-dpcgrid}
 N_EVAL_FILES=${N_EVAL_FILES:-20}
@@ -91,6 +119,7 @@ DATA_FILES=("${ALL[@]:0:$N_EVAL_FILES}")
 
 mkdir -p "$MODEL_DIR/showers_df_evaluation" "$SCR/wandb"
 cd "$REPO" || exit 1
+echo "[scan] model  : $MODEL   ($NETCFG)"
 echo "[scan] mode   : $MODE"
 echo "[scan] ckpt   : $CKPT"
 echo "[scan] files  : ${#DATA_FILES[@]} from $VAL_DIR"
@@ -100,7 +129,8 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 # Knobs a point may set. Reset to the code default before every point so one
 # point cannot leak into the next -- the single commonest way a scan lies.
 SCAN_KNOBS=(DPC_D_C DPC_RHO_MIN DPC_DELTA_MIN DPC_CORE_R DPC_NMS DPC_DEBUG_RHO
-            BAD_TRACK_REMOVAL BAD_TRACK_SIGMA BAD_TRACK_STATS ADD_LONELY_TRACKS)
+            BAD_TRACK_REMOVAL BAD_TRACK_SIGMA BAD_TRACK_STATS ADD_LONELY_TRACKS
+            EVAL_CLS_THRESHOLD EVAL_MASK_THRESHOLD)
 
 first=1
 for pt in $POINTS; do
@@ -116,6 +146,10 @@ for pt in $POINTS; do
     [[ -n "${EXTRA_ENV:-}" ]] && for kv in $EXTRA_ENV; do export "${kv?}"; done
     if [[ "$DEBUG_RHO_FIRST" == "1" && $first -eq 1 ]]; then export DPC_DEBUG_RHO=1; fi
     first=0
+    # knobs that are CLI flags rather than env vars
+    PT_ARGS=()
+    [[ -n "${EVAL_CLS_THRESHOLD:-}"  ]] && PT_ARGS+=(--eval-cls-threshold  "$EVAL_CLS_THRESHOLD")
+    [[ -n "${EVAL_MASK_THRESHOLD:-}" ]] && PT_ARGS+=(--eval-mask-threshold "$EVAL_MASK_THRESHOLD")
     OUT="eval_${TAG}_${LBL}.pkl"
     echo "=============================================================="
     echo -n "[scan] point=$LBL  env:"
@@ -127,7 +161,7 @@ for pt in $POINTS; do
         --data-test "${DATA_FILES[@]}" \
         --name-output "$OUT" \
         --data-config config_files/config_hits_track_delphi.yaml \
-        --network-config src/models/wrapper/example_mode_gatr_noise.py \
+        --network-config "$NETCFG" \
         --model-prefix "$MODEL_DIR" \
         --num-workers 4 --gpus 0 --batch-size "${BATCH_SIZE:-1}" \
         --start-lr 1e-4 --num-epochs 1 --train-batches 1 \
@@ -135,7 +169,7 @@ for pt in $POINTS; do
         --log-wandb --wandb-displayname "scan_${TAG}_${LBL}" \
         --wandb-projectname mlpf-delphi --wandb-entity optimal-design \
         --tracks \
-        "${MODE_ARGS[@]}"
+        "${MODE_ARGS[@]}" ${NETOPTS[@]+"${NETOPTS[@]}"} ${PT_ARGS[@]+"${PT_ARGS[@]}"}
     echo "[scan] point=$LBL exit=$?  end $(date +%T)"
 done
 
