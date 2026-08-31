@@ -130,7 +130,7 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 # point cannot leak into the next -- the single commonest way a scan lies.
 SCAN_KNOBS=(DPC_D_C DPC_RHO_MIN DPC_DELTA_MIN DPC_CORE_R DPC_NMS DPC_DEBUG_RHO
             BAD_TRACK_REMOVAL BAD_TRACK_SIGMA BAD_TRACK_STATS ADD_LONELY_TRACKS
-            EVAL_CLS_THRESHOLD EVAL_MASK_THRESHOLD)
+            EVAL_CLS_THRESHOLD EVAL_MASK_THRESHOLD FORCE_TRACK_ASSIGNMENT)
 
 first=1
 for pt in $POINTS; do
@@ -150,6 +150,9 @@ for pt in $POINTS; do
     PT_ARGS=()
     [[ -n "${EVAL_CLS_THRESHOLD:-}"  ]] && PT_ARGS+=(--eval-cls-threshold  "$EVAL_CLS_THRESHOLD")
     [[ -n "${EVAL_MASK_THRESHOLD:-}" ]] && PT_ARGS+=(--eval-mask-threshold "$EVAL_MASK_THRESHOLD")
+    # model-constructor options are `-o k v`, and eval parses the value with a
+    # bare ast.literal_eval, so it must be a Python literal (True, not true).
+    [[ -n "${FORCE_TRACK_ASSIGNMENT:-}" ]] && PT_ARGS+=(-o force_track_assignment "$FORCE_TRACK_ASSIGNMENT")
     OUT="eval_${TAG}_${LBL}.pkl"
     echo "=============================================================="
     echo -n "[scan] point=$LBL  env:"
