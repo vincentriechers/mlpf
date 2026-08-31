@@ -31,6 +31,11 @@ def _bce_pairwise(logits, targets, key_valid, hit_weight=None):
     `hit_weight` (B, N_k) optionally scales each key's contribution AND
     denominator — used to upweight tracker hits so the dominant calo hits
     don't drown them out of the gradient signal.
+
+    THE WEIGHT MUST APPEAR EXACTLY ONCE. `diff` already carries `valid_f`, so
+    `t` is masked with the bare validity flag and NOT weighted again — weighting
+    both sides of the einsum puts w^2 in the numerator against w in the
+    denominator, which is unbounded and is what broke the dice terms below.
     """
     valid_f = key_valid.float()
     if hit_weight is not None:
@@ -38,7 +43,7 @@ def _bce_pairwise(logits, targets, key_valid, hit_weight=None):
     pos_q = F.softplus(-logits) * valid_f.unsqueeze(1)
     neg_q = F.softplus(logits) * valid_f.unsqueeze(1)
     diff = pos_q - neg_q
-    t = targets.float() * valid_f.unsqueeze(1)
+    t = targets.float() * key_valid.unsqueeze(1).float()
     inter = torch.einsum("bnk,bpk->bnp", diff, t)
     sum_neg = neg_q.sum(dim=-1, keepdim=True)
     denom = valid_f.sum(dim=-1).view(-1, 1, 1).clamp(min=1.0)
@@ -69,7 +74,8 @@ def _focal_pairwise(logits, targets, key_valid, gamma=2.0, hit_weight=None):
     focal_pos = ((1.0 - p) ** gamma) * F.softplus(-logits) * valid_f.unsqueeze(1)
     focal_neg = (p ** gamma) * F.softplus(logits) * valid_f.unsqueeze(1)
     diff = focal_pos - focal_neg
-    t = targets.float() * valid_f.unsqueeze(1)
+    # weight once: `diff` already carries valid_f (see _bce_pairwise)
+    t = targets.float() * key_valid.unsqueeze(1).float()
     inter = torch.einsum("bnk,bpk->bnp", diff, t)
     sum_neg = focal_neg.sum(dim=-1, keepdim=True)
     denom = valid_f.sum(dim=-1).view(-1, 1, 1).clamp(min=1.0)
@@ -83,15 +89,22 @@ def _dice_pairwise(logits, targets, key_valid, eps=1e-6, hit_weight=None):
     With `hit_weight` (B, N_k), each hit's contribution to intersection and
     each cardinality is scaled — tracker hits weigh more so their dice loss
     actually drives gradient instead of being averaged away by the calo hits.
+
+    THE WEIGHT MUST APPEAR EXACTLY ONCE in each of the three sums. Scaling both
+    `p` and `t` put w^2 in the intersection against w in the denominator, so
+    `1 - 2*inter/(p_sum + t_sum)` became UNBOUNDED BELOW: a perfectly predicted
+    cluster of one tracker hit plus nine calo hits scored -0.5 at
+    track_loss_weight=3 and -4.74 at 10 instead of 0, and the optimiser chased
+    it. See `tests/test_dice_hit_weight.py`.
     """
     w = key_valid.unsqueeze(1).float()
     if hit_weight is not None:
         w = w * hit_weight.to(w.dtype).unsqueeze(1)
-    p = logits.sigmoid() * w
-    t = targets.float() * w
-    inter = torch.einsum("bnk,bpk->bnp", p, t)
-    p_sum = p.sum(dim=-1, keepdim=True)
-    t_sum = t.sum(dim=-1, keepdim=True).transpose(1, 2)
+    p = logits.sigmoid() * w                      # w * pred
+    t = targets.float()                           # masked below by w in the sums
+    inter = torch.einsum("bnk,bpk->bnp", p, t)    # sum_k w*pred*tgt
+    p_sum = p.sum(dim=-1, keepdim=True)           # sum_k w*pred
+    t_sum = (t * w).sum(dim=-1, keepdim=True).transpose(1, 2)   # sum_k w*tgt
     return 1.0 - (2.0 * inter + eps) / (p_sum + t_sum + eps)
 
 
@@ -184,11 +197,12 @@ def _mask_dice_loss(perm_mask_logits_p, gt_mask, key_valid, gt_valid, eps=1e-6,
     kv = key_valid.unsqueeze(1).float()
     if hit_weight is not None:
         kv = kv * hit_weight.to(kv.dtype).unsqueeze(1)
-    p = perm_mask_logits_p.sigmoid() * kv
-    t = gt_mask.float() * kv
-    inter = (p * t).sum(dim=-1)
-    p_sum = p.sum(dim=-1)
-    t_sum = t.sum(dim=-1)
+    # weight once per sum -- see _dice_pairwise
+    pr = perm_mask_logits_p.sigmoid()
+    tt = gt_mask.float()
+    inter = (kv * pr * tt).sum(dim=-1)
+    p_sum = (kv * pr).sum(dim=-1)
+    t_sum = (kv * tt).sum(dim=-1)
     dice = 1.0 - (2.0 * inter + eps) / (p_sum + t_sum + eps)
 
     # Per-particle weighting by GT cluster size.
