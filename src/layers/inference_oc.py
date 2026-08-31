@@ -253,11 +253,41 @@ def DPC(X, device):
     return labels.long().to(device)
 
 def remove_bad_tracks_from_cluster_v1(g, labels_hdb):
+    """Drop a track from its cluster when the calo energy disagrees with p_track.
+
+    CLD-derived, and two of its ingredients do not survive the move to DELPHI:
+
+      * `mask_hit_type_t4` is CLD's MUON CHAMBER, the exemption that stops a
+        minimum-ionising muon from being thrown away because its calo deposit is
+        far below its momentum. DELPHI's muon chambers are collections 8/9 and
+        `_filter_ecal_hcal` drops them before the parquet, so `hit_type == 4`
+        never occurs and `number_of_hits_muon < 1` is ALWAYS TRUE — the muon
+        exemption is dead code here and `bad_tracks` reduces to `bad_diffs`.
+      * `sigma_3 = 4*0.5/sqrt(p)` is a 4-sigma window on a 50%/sqrt(E)
+        resolution. DELPHI's HAC is worse than that, so the window is too tight
+        as well as mis-centred (measured <E_calo>/<p> is 0.83 for charged
+        hadrons and 0.38 for electrons, not 1).
+
+    Removing a track sets its node to noise while its calo hits stay, so the
+    object silently flips charged -> neutral: wrong EC head, wrong PID head, and
+    the momentum comes from the calorimeter instead of the tracker. Overridable
+    from the environment so the size of the effect can be measured POST-HOC:
+
+        BAD_TRACK_REMOVAL=0   skip entirely (the A/B control)
+        BAD_TRACK_SIGMA=<f>   replace the 4.0 sigma multiplier (default 4.0)
+        BAD_TRACK_STATS=1     print how often it fires, and on how much momentum
+    """
+    labels_changed_tracks = 0.0*(labels_hdb.clone())
+    if os.environ.get("BAD_TRACK_REMOVAL", "1") == "0":
+        return labels_hdb.clone(), labels_changed_tracks
+    n_sigma = float(os.environ.get("BAD_TRACK_SIGMA", 4.0))
+    _stats = os.environ.get("BAD_TRACK_STATS", "") == "1"
+    _n_tr = _n_bad = 0
+    _p_tr = _p_bad = 0.0
     mask_hit_type_t1 = g.ndata["hit_type"]==2
     mask_hit_type_t2 = g.ndata["hit_type"]==1
     mask_hit_type_t4 = g.ndata["hit_type"]==4
     labels_hdb_corrected_tracks = labels_hdb.clone()
-    labels_changed_tracks = 0.0*(labels_hdb.clone())
     # check each cluster
     for i in range(0, torch.max(labels_hdb)+1):
         mask_labels_i = labels_hdb == i
@@ -268,7 +298,7 @@ def remove_bad_tracks_from_cluster_v1(g, labels_hdb):
             number_of_hits_muon = torch.sum(mask_labels_i*mask_hit_type_t4)
             diffs = torch.abs(e_cluster-p_track)/p_track
             diffs = diffs.view(-1)
-            sigma_3 = 4*0.5/torch.sqrt(p_track).view(-1)
+            sigma_3 = n_sigma*0.5/torch.sqrt(p_track).view(-1)
 
             bad_diffs = diffs>sigma_3
 
@@ -281,7 +311,16 @@ def remove_bad_tracks_from_cluster_v1(g, labels_hdb):
             labels_hdb_corrected_tracks[bad_tracks_nodes] = 0
             if torch.sum(bad_tracks_nodes)>0:
                 labels_changed_tracks[mask_labels_i]=1
-            
+            if _stats:
+                _pv = p_track.view(-1)
+                _n_tr += int(len(_pv)); _p_tr += float(_pv.sum())
+                _n_bad += int(bad_tracks.sum()); _p_bad += float(_pv[bad_tracks].sum())
+
+    if _stats:
+        print("[bad-track] event: tracks_in_clusters=%d removed=%d (%.1f%%)"
+              "  p_total=%.2f p_removed=%.2f GeV (%.1f%%)  n_sigma=%.1f"
+              % (_n_tr, _n_bad, 100.0*_n_bad/max(_n_tr, 1),
+                 _p_tr, _p_bad, 100.0*_p_bad/max(_p_tr, 1e-9), n_sigma), flush=True)
     return labels_hdb_corrected_tracks, labels_changed_tracks
 
 def remove_bad_tracks_from_cluster(g, labels_hdb):
