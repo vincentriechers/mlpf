@@ -146,10 +146,39 @@ def DPC_custom_CLD_240(X, g, device, use_nms_centers=False):
 
 
 def DPC_custom_CLD(X, g, device, use_nms_centers=False):
+    """Density-peak clustering of the OC coordinate space into showers.
+
+    THESE FOUR NUMBERS DECIDE HOW MANY CLUSTERS COME OUT, and they were tuned
+    for CLD (hence the name), a detector with ~10k hits/event against DELPHI's
+    ~530. On DELPHI the fully-trained HitPF model produces **34.5 clusters/event
+    against 56.0 truth objects** at only 3.4 % fakes — it is not inventing
+    clusters, it is failing to separate them, and efficiency is worst exactly
+    where objects crowd together (electrons 0.384, sub-500 MeV showers 0.447).
+    That is the single biggest gap between HitPF and DELANA
+    (sigma68 0.259 vs 0.150), and it is a CLUSTERING-side problem that no amount
+    of energy correction fixes.
+
+    They are now overridable from the environment so they can be scanned WITHOUT
+    RETRAINING — only this inference step re-runs. Defaults reproduce the
+    previous behaviour exactly.
+
+        DPC_D_C        density kernel radius        (0.1)
+        DPC_RHO_MIN    min density to be a centre   (0.05)  lower -> more clusters
+        DPC_DELTA_MIN  min separation of centres    (0.4)   lower -> more clusters
+        DPC_CORE_R     core-assignment radius       (0.5)
+        DPC_NMS        1 = use _select_centers_nms instead of dc.cluster_centers
+
+    `delta_min` is the first knob to try: it is the minimum distance to a
+    higher-density point required to declare a NEW centre, so it directly sets
+    how close two showers may be before they are merged into one.
+    """
     tic =  time.time()
-    d_c = 0.1
-    rho_min = 0.05
-    delta_min = 0.4
+    d_c = float(os.environ.get("DPC_D_C", 0.1))
+    rho_min = float(os.environ.get("DPC_RHO_MIN", 0.05))
+    delta_min = float(os.environ.get("DPC_DELTA_MIN", 0.4))
+    core_r = float(os.environ.get("DPC_CORE_R", 0.5))
+    if os.environ.get("DPC_NMS", "") == "1":
+        use_nms_centers = True
     D = dc.distance_matrix(X.float().detach().cpu())
     rho = local_density_energy(D,d_c,g.ndata["e_hits"].view(-1).cpu().numpy()) #dc.local_density
     delta,nearest = dc.distance_to_larger_density(D, rho)
@@ -159,10 +188,24 @@ def DPC_custom_CLD(X, g, device, use_nms_centers=False):
         centers = dc.cluster_centers(rho, delta, rho_min=rho_min, delta_min=delta_min)
     # Assign cluster ID's to all datapoints
     ids = dc.assign_cluster_id(rho, nearest, centers)
+    if os.environ.get("DPC_DEBUG_RHO", "") == "1":
+        # rho is ENERGY-WEIGHTED (local_density_energy sums e_hits), so it
+        # carries GeV and rho_min is an ABSOLUTE cut. DELPHI cells are ~15 MeV
+        # against CLD's much larger ones, so print where the CLD-tuned 0.05
+        # actually sits in this detector's rho distribution.
+        q = np.percentile(rho, [1, 5, 25, 50, 75, 95, 99])
+        print("[dpc-rho] n=%d  rho pct1/5/25/50/75/95/99 = %s  max=%.4g"
+              " | rho>rho_min(%.4g): %d/%d (%.1f%%)  delta>delta_min(%.4g): %d"
+              "  centers=%d"
+              % (len(rho), " ".join("%.4g" % v for v in q), float(np.max(rho)),
+                 rho_min, int((rho > rho_min).sum()), len(rho),
+                 100.0 * (rho > rho_min).mean(),
+                 delta_min, int((delta > delta_min).sum()), len(centers)),
+              flush=True)
     core_ids = np.full(len(X), -1)   # default noise / non-core label
     D[np.isnan(D)]=0
     for indx, c in enumerate(centers):
-        idx = np.where((ids == indx) & (D[:, c] < 0.5))[0]
+        idx = np.where((ids == indx) & (D[:, c] < core_r))[0]
         core_ids[idx] = indx
     labels = torch.Tensor(core_ids)+1
     toc = time.time()

@@ -30,6 +30,18 @@
 #     string (train_utils.py:58). So every `-o` value here must be a valid Python
 #     literal: `None`, `3.0`, `True` are fine, a bare word like `focal` raises
 #     ValueError. Quote it if you need one.
+#
+# EVENT ORDER IN THE OUTPUT DATAFRAME IS NOT SORTED-FILE ORDER.
+# `--num-workers 4` makes the DataLoader round-robin one event from each of four
+# open parquets, so `number_batch` indexes the STREAM, not the file list:
+#   stream i  ->  file (i%4 + 4*((i//4)//100)), event ((i//4)%100)
+# Verified on the HitPF and Mask3D full evals, 4800/4800 events. Any analysis
+# that joins this dataframe to the parquets positionally (truth, DELANA) is then
+# comparing each event against a DIFFERENT event, which inflated every model
+# sigma68 in this project by ~32% (HitPF read 0.201 instead of 0.152).
+# `analysis/three_way_visible_energy.py` now recovers and verifies the
+# permutation itself, so existing dataframes are usable as they are. Setting
+# --num-workers 1 here would also fix it, at ~4x the wall clock.
 # =============================================================================
 #SBATCH --job-name=delphi_eval_clust
 #SBATCH --output=/gpfs/scratch/ehpc1013/vriecher/slurm-logs/%x-%j.out
