@@ -456,7 +456,19 @@ class ExampleWrapper(L.LightningModule):
         # scheduler = WarmupCosineAnnealingThenFixedScheduler(
         #     optimizer, warmup_steps=2000, T_max=int(36400*2), fixed_lr=1e-5
         # )
-        scheduler = CosineAnnealingThenFixedScheduler(optimizer, T_max=100000, fixed_lr=1e-6)
+        # T_max was a hardcoded 100000 and does NOT track --num-epochs, even
+        # though the scheduler is stepped per step. That makes it, not the epoch
+        # count, the thing that decides when training stops improving. Kept as
+        # the default so CLD/ALLEGRO runs are unchanged; --lr-cosine-tmax -1
+        # anneals over the actual run length instead.
+        t_max = int(getattr(self.args, "lr_cosine_tmax", 0) or 0)
+        if t_max < 0:
+            t_max = max(int(self.args.num_epochs) * int(self.args.train_batches), 1)
+        elif t_max == 0:
+            t_max = 100000
+        scheduler = CosineAnnealingThenFixedScheduler(optimizer, T_max=t_max, fixed_lr=1e-6)
+        print(f"[lr] CosineAnnealingThenFixedScheduler T_max={t_max} "
+              f"(stepped per step) start_lr={self.args.start_lr} fixed_lr=1e-6", flush=True)
         self.scheduler = scheduler
         return {
             "optimizer": optimizer,
@@ -498,7 +510,9 @@ def obtain_batch_numbers(g):
 class CosineAnnealingThenFixedScheduler:
     def __init__(self, optimizer, T_max, fixed_lr):
         self.cosine_scheduler = CosineAnnealingLR(optimizer, T_max=T_max, eta_min=fixed_lr)
-        self.fixed_lr = 1e-6
+        # was `self.fixed_lr = 1e-6`, which silently discarded the argument. Every
+        # in-tree caller passes 1e-6, so honouring it changes no existing run.
+        self.fixed_lr = fixed_lr
         self.T_max = T_max
         self.step_count = 0
         self.optimizer = optimizer

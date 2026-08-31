@@ -258,6 +258,20 @@ parser.add_argument(
     default=None,
     help="used to resume interrupted training, load model and optimizer state saved in the `epoch-%d_state.pt` and `epoch-%d_optimizer.pt` files",
 )
+parser.add_argument(
+    "--lr-cosine-tmax",
+    type=int,
+    default=0,
+    help="length in OPTIMIZER STEPS of the GATr path's cosine anneal "
+    "(Gatr_pf_e_noise.configure_optimizers). 0 = keep the hardcoded 100000, "
+    "which is the previous behaviour and what CLD/ALLEGRO runs assume. "
+    "-1 = num_epochs * train_batches, i.e. anneal exactly over the run. "
+    "The hardcoded value does not track --num-epochs and it is stepped PER "
+    "STEP, so it decides where training effectively ends: DELPHI's hitpf_stage1 "
+    "(104125 steps) was below lr 1e-5 by step ~87000 and spent its last 4125 "
+    "steps pinned at 1e-6, while hitpf_stage2_bal (12250 steps) moved its lr by "
+    "only -0.9% and never annealed at all.",
+)
 parser.add_argument("--start-lr", type=float, default=5e-3, help="start learning rate")
 parser.add_argument("--batch-size", type=int, default=128, help="batch size")
 parser.add_argument(
