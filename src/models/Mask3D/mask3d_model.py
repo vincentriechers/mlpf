@@ -524,6 +524,9 @@ class ExampleWrapper(L.LightningModule):
         # clustering-completeness vs Pandora test). Fall back to the static
         # defaults / the ctor track threshold so training is unaffected.
         self.eval_mask_threshold = float(getattr(args, "eval_mask_threshold", 0.5))
+        # cls_threshold was never passed to labels_from_masks, so it sat at the
+        # function default 0.5 while its two siblings were CLI-sweepable.
+        self.eval_cls_threshold = float(getattr(args, "eval_cls_threshold", 0.5))
         self.eval_track_mask_threshold = float(
             getattr(args, "eval_track_mask_threshold", self.track_mask_threshold)
         )
@@ -717,6 +720,7 @@ class ExampleWrapper(L.LightningModule):
                         ml[i, :, :n_i], cl[i],
                         hit_type=ht_i,
                         mask_threshold=self.eval_mask_threshold,
+                        cls_threshold=self.eval_cls_threshold,
                         track_mask_threshold=self.eval_track_mask_threshold,
                         track_hit_type=getattr(self, "track_hit_type", 1),
                         force_track_assignment=getattr(
@@ -899,6 +903,7 @@ class ExampleWrapper(L.LightningModule):
                 pandora_available=self.args.pandora,
                 truth_tracks=getattr(self.args, "truth_tracking", False),
                 mask_threshold=self.eval_mask_threshold,
+                cls_threshold=self.eval_cls_threshold,
                 track_mask_threshold=self.eval_track_mask_threshold,
                 force_track_assignment=self.force_track_assignment,
                 track_hit_type=self.track_hit_type,
@@ -1045,6 +1050,7 @@ class ExampleWrapper(L.LightningModule):
                 pandora_available=self.args.pandora,
                 truth_tracks=getattr(self.args, "truth_tracking", False),
                 mask_threshold=self.eval_mask_threshold,
+                cls_threshold=self.eval_cls_threshold,
                 track_mask_threshold=self.eval_track_mask_threshold,
                 force_track_assignment=self.force_track_assignment,
                 track_hit_type=self.track_hit_type,
