@@ -130,7 +130,8 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 # point cannot leak into the next -- the single commonest way a scan lies.
 SCAN_KNOBS=(DPC_D_C DPC_RHO_MIN DPC_DELTA_MIN DPC_CORE_R DPC_NMS DPC_DEBUG_RHO
             BAD_TRACK_REMOVAL BAD_TRACK_SIGMA BAD_TRACK_STATS ADD_LONELY_TRACKS
-            EVAL_CLS_THRESHOLD EVAL_MASK_THRESHOLD FORCE_TRACK_ASSIGNMENT)
+            EVAL_CLS_THRESHOLD EVAL_MASK_THRESHOLD FORCE_TRACK_ASSIGNMENT
+            M3D_VALID_ARGMAX M3D_DEBUG_LABELS)
 
 first=1
 for pt in $POINTS; do
