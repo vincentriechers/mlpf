@@ -2,7 +2,7 @@
 # =============================================================================
 # DELPHI STAGE 2 — energy correction + PID — on BSC MareNostrum 5.
 #
-# Port of scripts/scripts_vincent/train_properties_delphi.sh (UNIGE Baobab,
+# Port of scripts/scripts_vincent/train_properties_delphi.sh (Baobab,
 # apptainer) to BSC, with the same physics flags.
 #
 # >>> STAGE 2 DOES NOT DEPEND ON STAGE 1. IT CAN RUN RIGHT NOW. <<<
@@ -24,7 +24,7 @@
 #    Gatr_pf_e.py:864/882, and our --network-config is
 #    example_mode_gatr_noise.py -> Gatr_pf_e_noise.py, which routes the PID loss
 #    through energy_correction_NN_v1.pid_loss_weighted instead. It is passed
-#    below only to stay faithful to the UNIGE recipe; it does nothing here.
+#    below only to stay faithful to the reference recipe; it does nothing here.
 #    The knob that DOES work on this path is `--pid-class-weighting`.
 #  * `--add-track-chis` is REQUIRED: energy_correction_NN_v1.py:358 asserts it.
 #
@@ -81,7 +81,7 @@ MASTER_PORT=${MASTER_PORT:-29500}
 RUN_NAME=${RUN_NAME:-delphi_stage2}
 BATCH_SIZE=${BATCH_SIZE:-20}
 # Linear LR scaling from the ARC anchor (1e-3 at effective batch 160). The
-# UNIGE calibration found per-EVENT cost GROWS with per-rank batch here
+# The reference calibration found per-EVENT cost GROWS with per-rank batch here
 # (3.8 ev/s @20, 2.0 @40, 2.0 @80) — unmasked attention over the batched graph
 # in the EC submodels — which matches what we measured for HitPF stage 1. So
 # scale with MORE RANKS, not a bigger BATCH_SIZE.
@@ -101,7 +101,7 @@ NETWORK_CONFIG=${NETWORK_CONFIG:-src/models/wrapper/example_mode_gatr_noise.py}
 NETWORK_OPTS=${NETWORK_OPTS:-}
 # HitPF/GATr IGNORES --optimizer entirely — Gatr_pf_e_noise.configure_optimizers
 # hardcodes torch.optim.Adam — so `ranger` there is a no-op kept for fidelity
-# with the UNIGE recipe. mask3d_model DOES read it, and raises because
+# with the reference recipe. mask3d_model DOES read it, and raises because
 # `pytorch_optimizer` is not installed in the BSC env. So Mask3D stage-2 needs
 # OPTIMIZER=adamW.
 OPTIMIZER=${OPTIMIZER:-ranger}

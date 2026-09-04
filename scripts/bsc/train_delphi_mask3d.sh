@@ -2,7 +2,7 @@
 # =============================================================================
 # DELPHI plain MASK3D (encoder + MaskFormerDecoder) — BSC MareNostrum 5.
 #
-# This is the variant Dolores recommended ("train a mask3d model"), and it is
+# This is the recommended upstream variant ("train a mask3d model"), and it is
 # NOT what scripts/bsc/smoke_delphi_attn_ipa.sh trains. The three are different
 # models, not spellings of one:
 #
