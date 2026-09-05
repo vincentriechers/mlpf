@@ -164,6 +164,8 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
       --wandb-entity optimal-design \
       --tracks \
       --train-val-split 0.98 \
+      ${SEED:+--seed "$SEED"} \
+      ${LOAD_WEIGHTS:+--load-model-weights "$LOAD_WEIGHTS"} \
       --train-batches "${TRAIN_BATCHES:-50}" \
       -o track_loss_weight "$TRACK_LOSS_WEIGHT" \
       -o window_size "$WINDOW_SIZE" \

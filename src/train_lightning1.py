@@ -201,7 +201,9 @@ def main():
     gpus, dev = set_gpus(args)
 
     if training_mode and args.load_model_weights:
-        model = load_train_model(args, dev)
+        # pass the model built from --network-config; without it load_train_model
+        # substitutes a hardcoded GATr and the warm start trains the wrong model.
+        model = load_train_model(args, dev, model=model)
 
     # --------------------------------------------------
     # Logger

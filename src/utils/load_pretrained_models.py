@@ -1,11 +1,43 @@
 
 import torch 
 
-def load_train_model(args, dev):
-    from src.models.GATr.Gatr_pf_e_noise import ExampleWrapper as GravnetModel
-    model = GravnetModel.load_from_checkpoint(
-        args.load_model_weights, args=args, dev=0, map_location=dev,strict=False)
-    return model 
+def load_train_model(args, dev, model=None):
+    """Warm-start a TRAINING run from --load-model-weights.
+
+    Pass the model `model_setup` already built from --network-config and the
+    weights are loaded into it. Without `model` this falls back to the historical
+    behaviour, which builds a HARDCODED Gatr_pf_e_noise and ignores
+    --network-config entirely.
+
+    That fallback silently trains the wrong architecture for any non-GATr
+    warm start: the wrapper from --network-config is discarded, the checkpoint is
+    loaded into a GATr model with strict=False so almost no key matches, and what
+    trains is a randomly-initialised GATr. It exits 0 and the loss falls
+    smoothly. The only outward sign is the loss FAMILY in the logs -- object
+    condensation (`loss lv`, `loss beta`) instead of the mask losses the Mask3D /
+    Attn-IPA models emit. Caught 2026-09-05 on an Attn-IPA continuation
+    (job 45444306, cancelled after 30 min).
+
+    The load is shape-matched and non-strict, and it PRINTS what it did: a warm
+    start that matches almost nothing is the failure mode to catch here.
+    """
+    if model is None:
+        from src.models.GATr.Gatr_pf_e_noise import ExampleWrapper as GravnetModel
+        return GravnetModel.load_from_checkpoint(
+            args.load_model_weights, args=args, dev=0, map_location=dev, strict=False)
+
+    target = getattr(model, "mod", model)
+    ckpt = torch.load(args.load_model_weights, map_location="cpu")
+    sd = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+    tgt_sd = target.state_dict()
+    keep = {k: v for k, v in sd.items() if k in tgt_sd and tgt_sd[k].shape == v.shape}
+    missing, unexpected = target.load_state_dict(keep, strict=False)
+    print(f"[warm-start] {args.network_config} <- {args.load_model_weights}: "
+          f"loaded {len(keep)}/{len(sd)} shape-matching keys "
+          f"({len(missing)} missing, {len(unexpected)} unexpected). "
+          f"A low ratio here means the checkpoint does not match this architecture.",
+          flush=True)
+    return model
 
 
 def load_test_model(args, dev, data_config=None):
