@@ -90,7 +90,33 @@ case "$MODEL" in
     CLUST_FLAGS=(--optimizer adamW)
     NETOPTS=(-o use_ipa_decoder False -o num_queries "${NUM_QUERIES:-320}"
              -o window_size None) ;;
-  *) echo "MODEL must be hitpf or mask3d, got '$MODEL'" >&2; exit 2 ;;
+  attnipa)
+    # Attn-IPA checkpoints are evaluated through mask3d_model with
+    # use_ipa_decoder True -- attn_ipa_model has no eval path, and the two are
+    # deliberately state-dict compatible. EVERY SHAPE-BEARING TRAINING OPTION
+    # must be repeated here or load_test_model keeps only the shape-matching
+    # keys (strict=False) and evaluates a half-random model. WATCH THE LOAD LINE.
+    #
+    # Eval parses `-o` values with a bare ast.literal_eval, unlike training which
+    # falls back to the raw string, so string values must be QUOTED literals:
+    # "'kmeans'" not kmeans.
+    NETCFG=src/models/wrapper/example_mode_mask3d.py
+    DEF_CLUST=$SCR/trained-models/attnipa_ref/_epoch=7_step=97500.ckpt
+    DEF_EC=$SCR/trained-models/mask3d_stage2_bal/_epoch=1_step=12000.ckpt
+    DEF_FULLDIR=$SCR/trained-models/fulleval_attnipa
+    DEF_CLUSTDIR=$SCR/trained-models/attnipa_ref
+    FULL_FLAGS=(--optimizer adamW --mask3d-use-mask-labels)
+    CLUST_FLAGS=(--optimizer adamW)
+    NETOPTS=(-o use_ipa_decoder True
+             -o num_queries "${NUM_QUERIES:-320}"
+             -o window_size None
+             -o cross_attn_mode "'kmeans'"
+             -o kmeans_value_proj True
+             -o ipa_mask_direction_aware True
+             -o dynamic_query_source "'encoder'"
+             -o track_seed_bonus 6e4
+             -o track_loss_weight 3.0) ;;
+  *) echo "MODEL must be hitpf, mask3d or attnipa, got '$MODEL'" >&2; exit 2 ;;
 esac
 if [[ "$MODE" == "full" ]]; then
     MODEL_DIR=${MODEL_DIR:-$DEF_FULLDIR}
@@ -131,7 +157,7 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 SCAN_KNOBS=(DPC_D_C DPC_RHO_MIN DPC_DELTA_MIN DPC_CORE_R DPC_NMS DPC_DEBUG_RHO
             BAD_TRACK_REMOVAL BAD_TRACK_SIGMA BAD_TRACK_STATS ADD_LONELY_TRACKS
             EVAL_CLS_THRESHOLD EVAL_MASK_THRESHOLD FORCE_TRACK_ASSIGNMENT
-            M3D_VALID_ARGMAX M3D_DEBUG_LABELS)
+            M3D_VALID_ARGMAX M3D_DEBUG_LABELS EC_CKPT_OVERRIDE)
 
 first=1
 for pt in $POINTS; do
@@ -154,6 +180,10 @@ for pt in $POINTS; do
     # model-constructor options are `-o k v`, and eval parses the value with a
     # bare ast.literal_eval, so it must be a Python literal (True, not true).
     [[ -n "${FORCE_TRACK_ASSIGNMENT:-}" ]] && PT_ARGS+=(-o force_track_assignment "$FORCE_TRACK_ASSIGNMENT")
+    # Swap the stage-2 EC checkpoint per point. argparse keeps the LAST
+    # occurrence of a `store` argument and PT_ARGS is appended after MODE_ARGS,
+    # so this overrides the job-level --load-model-weights.
+    [[ -n "${EC_CKPT_OVERRIDE:-}" ]] && PT_ARGS+=(--load-model-weights "$EC_CKPT_OVERRIDE")
     OUT="eval_${TAG}_${LBL}.pkl"
     echo "=============================================================="
     echo -n "[scan] point=$LBL  env:"
