@@ -18,6 +18,7 @@ import torch
 import dgl
 import pandas as pd
 
+from src.layers.postprocess_labels import postprocess_labels
 from src.layers.inference_oc import (
     match_showers,
     generate_showers_data_frame,
@@ -235,6 +236,9 @@ def create_and_store_graph_output_mask3d(
                 labels, _ = remove_bad_tracks_from_cluster_v1(
                     dic["graph"], labels
                 )
+                # mirror of mask3d_model._post_decoder — same env, same graph,
+                # deterministic, so the EC side and this side agree exactly
+                labels = postprocess_labels(dic["graph"], labels)
                 if _os.environ.get("M3D_DEBUG_LABELS"):
                     _u = torch.unique(labels)
                     print("[m3d-df] labels post-clean: n_clusters=%d has0=%s n_hits0=%d"

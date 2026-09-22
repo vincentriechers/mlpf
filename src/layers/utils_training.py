@@ -2,6 +2,7 @@
 from lightning.pytorch.callbacks import BaseFinetuning
 import os
 import torch
+from src.layers.postprocess_labels import postprocess_labels
 import torch.nn as nn
 import dgl
 from src.layers.inference_oc import (
@@ -123,6 +124,7 @@ def obtain_clustering_for_matched_showers(
     y_pids_matched = []
     y_coords_matched = []
     all_cluster_labels = []
+    fakes_idx = torch.zeros(0, dtype=torch.long, device=batch_g.device)
     if not  use_gt_clusters:
         batch_g.ndata["coords"] = model_output[:, 0:clust_dim]
         batch_g.ndata["beta"] = model_output[:, clust_dim]
@@ -180,6 +182,12 @@ def obtain_clustering_for_matched_showers(
                     labels = compact_labels_preserve_zero(labels)  # remap positives to 1..N, keep 0=noise
                 if os.environ.get("ADD_LONELY_TRACKS") == "1":
                     labels = add_lonely_tracks(dic["graph"], labels, float(os.environ.get("LONELY_TRACK_PMAX", "2.0")))
+                # Post-hoc track attachment / fragment merging (env-gated, off
+                # by default). HitPF computes labels once, here, and the
+                # dataframe side reuses them from ndata["pred_cluster_labels"].
+                _lab2 = postprocess_labels(dic["graph"], labels)
+                if _lab2 is not labels:
+                    labels = compact_labels_preserve_zero(_lab2)
                 # labels = clustering_obtain_labels( X,betas.view(-1), betas.device,  tbeta=0.7, td=0.3)
                 #if labels.min() == 0 and labels.sum() == 0:
                 #    labels += 1  # Quick hack
@@ -337,6 +345,31 @@ def obtain_clustering_for_matched_showers(
                 reco_energy_shower = torch.sum(graphs[i].ndata["e_hits"][mask])
                 reco_energy_showers_fakes.append(reco_energy_shower.view(-1))
     batch_g.ndata["pred_cluster_labels"] = torch.cat(all_cluster_labels)
+
+    # A batch in which NO predicted cluster paired with a truth particle
+    # leaves every accumulator empty, and `torch.cat([])` raises. This is not
+    # hypothetical: it killed three full evaluations of the 50k validation
+    # sample (the 42 offending files are listed in
+    # plots/talk_chef2026/_inputs/excluded_seeds_50k.txt), and it is
+    # UNAVOIDABLE on real data, where there is no truth to match against at
+    # all. Return well-formed empty tensors instead and let the caller drop
+    # the batch; every downstream consumer already iterates over these.
+    _dev = batch_g.device
+    if not true_energy_showers:
+        empty = torch.zeros(0, device=_dev, dtype=torch.float32)
+        return (
+            dgl.batch(graphs_showers_fakes) if graphs_showers_fakes
+            else dgl.batch([dgl.graph(([], [])).to(_dev)]),
+            empty,
+            torch.cat(reco_energy_showers_fakes, dim=0)
+            if reco_energy_showers_fakes else empty,
+            [],
+            empty,
+            [],
+            len(reco_energy_showers_fakes),
+            fakes_idx,
+        )
+
     graphs_showers_matched = dgl.batch(graphs_showers_matched + graphs_showers_fakes)
     true_energy_showers = torch.cat(true_energy_showers, dim=0)
     reco_energy_showers = torch.cat(reco_energy_showers + reco_energy_showers_fakes, dim=0)
