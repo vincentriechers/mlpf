@@ -42,6 +42,9 @@ from matplotlib.patches import Rectangle
 import src.evaluation.full_evaluation as fe
 
 DELPHI_LABEL = "HitPF"
+# What the overlaid curves are. The cut driver overlays target cuts; a driver that overlays
+# something else (e.g. full_evaluation_delphi_models.py) reassigns this before plotting.
+LEGEND_TITLE = "Target cut"
 KEY_CUTS = ["no cut", "CH must have track", "≥1 hit", "≥3 hits", "≥5 hits"]
 CUT_STYLES = {
     "no cut": {"color": "#0F4C5C", "marker": "o"},
@@ -104,7 +107,7 @@ def style_metric_axis_delphi(ax, particle, ylabel, metric_key, all_y, logy):
     fe.set_metric_ylim(ax, metric_key, all_y)
     if logy:
         ax.set_yscale("log")
-    ax.legend(fontsize=17, title="Target cut", title_fontsize=16)
+    ax.legend(fontsize=17, title=LEGEND_TITLE, title_fontsize=16)
 
 
 def apply_fe_patches():
@@ -291,7 +294,7 @@ def plot_resolution_comparison_delphi(model_curves, output_path):
         ax.grid(True, axis="y", alpha=0.25, linestyle="--")
         ax.set_axisbelow(True)
         ax.set_ylim(*fe.get_resolution_ylim(particle["key"], all_y))
-        ax.legend(fontsize=15, title="Target cut", title_fontsize=14)
+        ax.legend(fontsize=15, title=LEGEND_TITLE, title_fontsize=14)
     fe.save_fixed_canvas(fig, output_path)
 
 

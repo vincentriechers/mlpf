@@ -151,6 +151,10 @@ PLOT_COLORS = {
     "o2_v05 HitPF": "#0F4C5C",
     "o2_v05 Pandora": "#4F84C4",
 }
+# What the overlaid curves are. The ARC/CLD driver compares geometries and methods; a driver
+# that overlays something else (e.g. full_evaluation_delphi_models.py) reassigns this.
+LEGEND_TITLE = "Geometry / method"
+
 RATIO_METHOD_STYLES = {
     "HitPF": {"color": "#1D3557", "marker": "o", "linestyle": "-", "markersize": 6, "alpha": 0.15},
     "Pandora": {"color": "#9C6644", "marker": "^", "linestyle": "--", "markersize": 6, "alpha": 0.15},
@@ -703,7 +707,7 @@ def style_metric_axis(ax, particle, ylabel, metric_key, all_y, logy):
     set_metric_ylim(ax, metric_key, all_y)
     if logy:
         ax.set_yscale("log")
-    ax.legend(fontsize=21, title="Geometry / method", title_fontsize=19)
+    ax.legend(fontsize=21, title=LEGEND_TITLE, title_fontsize=19)
 
 
 def style_ratio_axis(ax, particle, ratio_ylabel, ratio_values, metric_key=None):
@@ -1418,7 +1422,7 @@ def plot_event_comparison(
             ax.set_yscale("log")
         handles, labels = ax.get_legend_handles_labels()
         if handles:
-            ax.legend(fontsize=19, title="Geometry / method", title_fontsize=17)
+            ax.legend(fontsize=19, title=LEGEND_TITLE, title_fontsize=17)
     save_fixed_canvas(fig, output_path)
 
 
@@ -1519,7 +1523,7 @@ def plot_resolution_comparison(model_curves, output_path):
         ax.grid(True, axis="y", alpha=0.25, linestyle="--")
         ax.set_axisbelow(True)
         ax.set_ylim(*get_resolution_ylim(particle["key"], all_y))
-        ax.legend(fontsize=19, title="Geometry / method", title_fontsize=17)
+        ax.legend(fontsize=19, title=LEGEND_TITLE, title_fontsize=17)
 
     save_fixed_canvas(fig, output_path)
 
@@ -1562,7 +1566,7 @@ def plot_resolution_comparison_with_ratio(model_curves, output_path):
         ax.grid(True, axis="y", alpha=0.25, linestyle="--")
         ax.set_axisbelow(True)
         ax.set_ylim(*get_resolution_ylim(particle["key"], all_y))
-        ax.legend(fontsize=21, title="Geometry / method", title_fontsize=19)
+        ax.legend(fontsize=21, title=LEGEND_TITLE, title_fontsize=19)
         plt.setp(ax.get_xticklabels(), visible=False)
 
         for method_key, numerator_label, denominator_label in ratio_pairs:
