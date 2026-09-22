@@ -23,6 +23,7 @@ from gatr import GATr, SelfAttentionConfig, MLPConfig
 import pickle
 from copy import deepcopy
 import sys
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -753,7 +754,23 @@ class EnergyCorrection():
         e_true_neutrals = e_true[mask_neutral_for_loss]
         e_pred_neutrals = e_cor[mask_neutral_for_loss]
         e_reco_neutrals = e_sum_hits[mask_neutral_for_loss]
-        in_distribution = (torch.abs(e_true_neutrals-e_reco_neutrals)/e_true_neutrals)<0.6
+        # Training-sample cut on the neutral energy head. At 0.6 it keeps
+        # 77.6 % of photons but only 40.9 % of E<5 GeV neutrons (median
+        # e_reco/e_true of the rejected ones is 0.24), so the head trains on a
+        # sample that is 94 % photons and converges to ~identity — measured
+        # neutral-hadron response 0.67 (Mask3D) / 0.80 (HitPF) with a
+        # correction factor of only 1.17 / 1.10, against 2.15 for charged
+        # hadrons. With --use-gt-clusters the cluster IS the whole particle, so
+        # a low e_reco/e_true is exactly the non-compensation the head exists
+        # to correct, not a clustering failure to be filtered. EC_NEUTRAL_INDIST
+        # overrides the 0.6 (e.g. 0.95 keeps everything with e_reco/e_true >
+        # 0.05); default unchanged so every existing checkpoint is reproduced.
+        _indist = float(os.environ.get("EC_NEUTRAL_INDIST", "0.6"))
+        if not getattr(self, "_indist_announced", False):
+            print(f"[ec] neutral-head in-distribution cut = {_indist} "
+                  f"(EC_NEUTRAL_INDIST; default 0.6)", flush=True)
+            self._indist_announced = True
+        in_distribution = (torch.abs(e_true_neutrals-e_reco_neutrals)/e_true_neutrals)<_indist
         ypred = e_pred_neutrals[in_distribution]
         ybatch = e_true_neutrals[in_distribution]
         if len(ypred)>0:
