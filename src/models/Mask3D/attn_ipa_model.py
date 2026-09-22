@@ -98,6 +98,9 @@ class AttnIPAModel(L.LightningModule):
         mask_cost_use_classification=False,
         obj_bce_cost_weight=1.0,
         track_loss_weight=1.0,
+        # Track-consistency term in the Hungarian matching cost only; see
+        # `loss._track_pairwise`. 0.0 disables (default).
+        track_cost_weight=0.0,
         track_hit_type=1,
         track_mask_threshold=0.1,
         force_track_assignment=False,
@@ -230,6 +233,7 @@ class AttnIPAModel(L.LightningModule):
         self.obj_bce_cost_weight = obj_bce_cost_weight
 
         self.track_loss_weight = float(track_loss_weight)
+        self.track_cost_weight = float(track_cost_weight)
         self.track_hit_type = int(track_hit_type)
         self.track_mask_threshold = float(track_mask_threshold)
         self.force_track_assignment = bool(force_track_assignment)
@@ -286,6 +290,7 @@ class AttnIPAModel(L.LightningModule):
             mask_cost_use_classification=self.mask_cost_use_classification,
             obj_bce_cost_weight=self.obj_bce_cost_weight,
             track_loss_weight=self.track_loss_weight,
+            track_cost_weight=self.track_cost_weight,
             track_hit_type=self.track_hit_type,
             dice_size_weighting=self.dice_size_weighting,
             T_final=getattr(self, "_last_T", None),
@@ -338,6 +343,7 @@ class AttnIPAModel(L.LightningModule):
             mask_cost_use_classification=self.mask_cost_use_classification,
             obj_bce_cost_weight=self.obj_bce_cost_weight,
             track_loss_weight=self.track_loss_weight,
+            track_cost_weight=self.track_cost_weight,
             track_hit_type=self.track_hit_type,
             dice_size_weighting=self.dice_size_weighting,
             T_final=getattr(self, "_last_T", None),

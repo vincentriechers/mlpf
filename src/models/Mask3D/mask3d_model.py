@@ -35,6 +35,7 @@ from src.layers.inference_oc_mask3d import (
     create_and_store_graph_output_mask3d,
     labels_from_masks,
 )
+from src.layers.postprocess_labels import postprocess_labels
 from src.layers.inference_oc import remove_bad_tracks_from_cluster_v1
 
 
@@ -214,6 +215,16 @@ class ExampleWrapper(L.LightningModule):
         #                         when you know all tracks in your data
         #                         have a matched cluster.
         track_loss_weight=3.0,
+        #   track_cost_weight     adds a track-consistency term to the
+        #                         Hungarian MATCHING COST only (soft-dice
+        #                         restricted to tracker hits, see
+        #                         `loss._track_pairwise`). Unlike
+        #                         track_loss_weight it does NOT touch the
+        #                         mask loss, so the objective the model
+        #                         optimises is unchanged and only the
+        #                         truth<->query assignment moves. 0.0
+        #                         disables it (default).
+        track_cost_weight=0.0,
         track_seed_bonus=6e4,
         force_track_assignment=False,
         track_hit_type=1,
@@ -517,6 +528,7 @@ class ExampleWrapper(L.LightningModule):
 
         # Stash for loss + inference paths.
         self.track_loss_weight = float(track_loss_weight)
+        self.track_cost_weight = float(track_cost_weight)
         self.track_hit_type = int(track_hit_type)
         self.force_track_assignment = bool(force_track_assignment)
         self.track_mask_threshold = float(track_mask_threshold)
@@ -737,6 +749,10 @@ class ExampleWrapper(L.LightningModule):
                         lab_i, _ = remove_bad_tracks_from_cluster_v1(
                             g_list[i], lab_i
                         )
+                        # Post-hoc track attachment / fragment merging (env-gated,
+                        # off by default). MUST be mirrored in
+                        # inference_oc_mask3d.create_and_store_graph_output_mask3d.
+                        lab_i = postprocess_labels(g_list[i], lab_i)
                         # Re-densify: remove_bad_tracks can empty a cluster and
                         # leave a label gap, which crashes match_showers
                         # downstream (sizes by len(unique) but indexes by
@@ -782,6 +798,7 @@ class ExampleWrapper(L.LightningModule):
                 per_subsystem_loss=self.per_subsystem_loss,
                 subsystem_offset=self.subsystem_offset,
                 track_loss_weight=self.track_loss_weight,
+                track_cost_weight=self.track_cost_weight,
                 track_hit_type=self.track_hit_type,
                 attn_bias=attn_bias,
                 gmm_coverage_weight=self.gmm_coverage_weight,
@@ -928,6 +945,7 @@ class ExampleWrapper(L.LightningModule):
                 per_subsystem_loss=self.per_subsystem_loss,
                 subsystem_offset=self.subsystem_offset,
                 track_loss_weight=self.track_loss_weight,
+                track_cost_weight=self.track_cost_weight,
                 track_hit_type=self.track_hit_type,
                 attn_bias=attn_bias,
                 gmm_coverage_weight=self.gmm_coverage_weight,

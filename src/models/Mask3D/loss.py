@@ -108,6 +108,48 @@ def _dice_pairwise(logits, targets, key_valid, eps=1e-6, hit_weight=None):
     return 1.0 - (2.0 * inter + eps) / (p_sum + t_sum + eps)
 
 
+def _track_pairwise(logits, targets, key_valid, is_track, eps=1e-6):
+    """Track-consistency MATCHING cost, (B, N_q, N_p), bounded in [0, 1].
+
+    Soft-Dice restricted to TRACKER hits. For a (query q, GT particle p) pair::
+
+        inter = Σ_{k ∈ track} σ(mask_qk) · t_pk
+        cost  = 1 - 2·inter / (Σ_{k ∈ track} σ(mask_qk) + Σ_{k ∈ track} t_pk)
+
+    so it is 0 when q holds exactly p's track, 1 when p owns a track that q
+    does not claim, and 1 when q claims a track that p does not own. Pairs
+    where NEITHER side touches the tracker (a neutral particle against a
+    track-free query) score 0 — the term is inert there and cannot distort
+    neutral matching.
+
+    Why this and not more `track_loss_weight`. The measured failure is that
+    the Hungarian matcher hands a track-owning truth particle to a
+    calo-fragment query rather than to the query holding that particle's
+    track, because one tracker hit cannot outweigh a nine-hit shower inside a
+    global dice. A per-hit weight cannot fix that: it rescales one term of a
+    sum that is still dominated by the calo hits, and it up-weights tracker
+    hits in EVERY cluster, including the ~51 % of DELPHI tracks that are
+    unlabelled noise. This term is a separate, additively-combined axis of the
+    cost with its own full [0, 1] range, so a track mismatch costs a whole
+    unit regardless of how many calo hits the competing query holds.
+
+    Applied to the matching COST only — never to the loss — so the mask
+    objective the model optimises is bit-identical to the baseline and only
+    the assignment changes. `track_cost_weight=0.0` (the default) skips it
+    entirely.
+    """
+    kv = (key_valid & is_track).unsqueeze(1).to(logits.dtype)      # (B, 1, N_k)
+    p = logits.sigmoid() * kv                                      # (B, N_q, N_k)
+    t = targets.to(logits.dtype) * kv                              # (B, N_p, N_k)
+    inter = torch.einsum("bnk,bpk->bnp", p, t)                     # (B, N_q, N_p)
+    p_sum = p.sum(dim=-1, keepdim=True)                            # (B, N_q, 1)
+    t_sum = t.sum(dim=-1).unsqueeze(1)                             # (B, 1, N_p)
+    den = p_sum + t_sum                                            # (B, N_q, N_p)
+    # 0/0 (neither side touches the tracker) must be 0, not 1.
+    return torch.where(den > eps, 1.0 - 2.0 * inter / den.clamp(min=eps),
+                       torch.zeros_like(den))
+
+
 def _cls_cost(cls_logits, gt_valid):
     """Binary objectness cost — hepattn `object_bce_cost`:
 
@@ -320,6 +362,13 @@ def mask3d_loss(
     per_subsystem_loss=False,
     subsystem_offset=0,
     track_loss_weight=1.0,
+    # Track-consistency term in the Hungarian MATCHING COST only (never in
+    # the loss). See `_track_pairwise`. 0.0 disables it and reproduces every
+    # earlier run bit-for-bit. Scale it against the other cost terms: the
+    # mask-dice cost spans w["mask_dice"] = 0.75 and the objectness cost
+    # spans obj_bce_cost_weight = 1.0, so a weight of ~1.0 is what it takes
+    # for a track mismatch to outrank a whole shower's worth of dice.
+    track_cost_weight=0.0,
     track_hit_type=1,
     attn_bias=None,
     gmm_coverage_weight=0.0,
@@ -427,11 +476,14 @@ def mask3d_loss(
     # the model can score ~99% dice while completely ignoring tracker hits.
     # Boosting their contribution forces the matcher and the loss to actually
     # pay attention to them.
+    hit_sub_all = targets.get("hit_subsystem")
+    is_track_all = None if hit_sub_all is None else (hit_sub_all == track_hit_type)
+
     hit_weight = None
     if track_loss_weight is not None and track_loss_weight != 1.0:
-        hit_sub = targets.get("hit_subsystem")
+        hit_sub = hit_sub_all
         if hit_sub is not None:
-            is_track = (hit_sub == track_hit_type)
+            is_track = is_track_all
             hit_weight = torch.where(
                 is_track,
                 torch.full_like(hit_sub, 0, dtype=torch.float32) + float(track_loss_weight),
@@ -558,6 +610,12 @@ def mask3d_loss(
             cost = cost + obj_bce_cost_weight * _cls_cost(
                 outs["cls_logits"], gt_valid
             )
+            # Track consistency — one term for the whole event, NOT per
+            # subsystem (the tracker is one subsystem by construction).
+            if track_cost_weight and is_track_all is not None:
+                cost = cost + track_cost_weight * _track_pairwise(
+                    outs["mask_logits"], gt_mask, key_valid, is_track_all
+                )
             # Padded GT slots are excluded by the matcher via object_valid_mask
             # (truncates rows to the first n_real), so no cost inflation needed
             # — same as hepattn.
