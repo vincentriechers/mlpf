@@ -1,6 +1,6 @@
 """Post-hoc cluster-label repair, shared by the Mask3D and HitPF inference paths.
 
-Two operations, both aimed at defects that were MEASURED on the DELPHI energy
+One operation, aimed at a defect that was MEASURED on the DELPHI energy
 budget (`delphi_converter/analysis/energy_where.py`, 15 000 events, Mask3D
 32-epoch + valid-argmax configuration; numbers are shares of the event's truth
 energy):
