@@ -1,14 +1,9 @@
 #!/bin/bash
 # =============================================================================
-# DELPHI clustering evaluation on BSC — HitPF **or** Mask3D/Attn-IPA.
-#
-# Produces the matched-showers dataframe under
+# DELPHI clustering evaluation (STAGE 1 ONLY) — HitPF or Mask3D/Attn-IPA.
+# Writes the matched-showers dataframe to
 #     <MODEL_DIR>/showers_df_evaluation/<OUTPUT_NAME>
-# which is what the DELPHI performance plots and the three-way
-# DELANA / HitPF / Mask3D comparison consume.
-#
-# Runs on the HELD-OUT 50k validation sample (independent seeds), NOT the tail
-# of the training folder.
+# on the HELD-OUT 50k validation sample, not the tail of the training folder.
 #
 #   MODEL=hitpf  sbatch scripts/bsc/eval_delphi_clustering.sh
 #   MODEL=mask3d CKPT=/path/to/_epoch=0_step=N.ckpt \
@@ -16,32 +11,11 @@
 #
 # Env: MODEL {hitpf|mask3d}, CKPT, MODEL_DIR, RUN_NAME, N_EVAL_FILES, BATCH_SIZE
 #
-# TWO TRAPS, both paid for already:
-#
-#  1. **Pass the SAME `-o` options you trained with.** For Mask3D that means
-#     `-o window_size None`; without it the encoder builds flash-attn windowed
-#     layers instead of xformers block-diagonal ones, the shapes change, and
-#     load_test_model silently keeps only the shape-matching keys (strict=False)
-#     — you get a randomly-initialised encoder and a plausible-looking but
-#     meaningless evaluation. WATCH THE `loaded N/M shape-matching keys` LINE:
-#     it must be 412/412 with 0 missing and 0 unexpected.
-#  2. **Eval parses `-o` values with a bare `ast.literal_eval`**
-#     (load_pretrained_models.py:33), unlike training which falls back to the raw
-#     string (train_utils.py:58). So every `-o` value here must be a valid Python
-#     literal: `None`, `3.0`, `True` are fine, a bare word like `focal` raises
-#     ValueError. Quote it if you need one.
-#
-# EVENT ORDER IN THE OUTPUT DATAFRAME IS NOT SORTED-FILE ORDER.
-# `--num-workers 4` makes the DataLoader round-robin one event from each of four
-# open parquets, so `number_batch` indexes the STREAM, not the file list:
-#   stream i  ->  file (i%4 + 4*((i//4)//100)), event ((i//4)%100)
-# Verified on the HitPF and Mask3D full evals, 4800/4800 events. Any analysis
-# that joins this dataframe to the parquets positionally (truth, DELANA) is then
-# comparing each event against a DIFFERENT event, which inflated every model
-# sigma68 in this project by ~32% (HitPF read 0.201 instead of 0.152).
-# `analysis/three_way_visible_energy.py` now recovers and verifies the
-# permutation itself, so existing dataframes are usable as they are. Setting
-# --num-workers 1 here would also fix it, at ~4x the wall clock.
+# THREE TRAPS. Pass the SAME `-o` options the checkpoint was trained with and
+# check the `loaded N/M shape-matching keys` line (must be 412/412) — loading is
+# strict=False, so a mismatch gives a plausible, meaningless evaluation. `-o`
+# values are parsed here with a bare ast.literal_eval, so each must be a valid
+# Python literal. Event order in the output is NOT sorted-file order.
 # =============================================================================
 #SBATCH --job-name=delphi_eval_clust
 #SBATCH --output=/gpfs/scratch/ehpc1013/vriecher/slurm-logs/%x-%j.out
@@ -104,7 +78,7 @@ CKPT=${CKPT:-$( (ls -1t "$MODEL_DIR"/*.ckpt 2>/dev/null || true) | head -n1 )}
 RUN_NAME=${RUN_NAME:-eval_${MODEL}}
 OUTPUT_NAME=${OUTPUT_NAME:-eval_clustering_delphi_${MODEL}.pkl}
 
-VAL_DIR=$SCR/data/50k_validation_delana/digitized
+VAL_DIR=${VAL_DIR:-$SCR/data/50k_validation_delana/digitized}
 N_EVAL_FILES=${N_EVAL_FILES:-all}
 mapfile -t ALL_FILES < <(ls -1 "$VAL_DIR"/pf_tree_*.parquet 2>/dev/null)
 if [[ ${#ALL_FILES[@]} -eq 0 ]]; then echo "no parquets in $VAL_DIR" >&2; exit 2; fi

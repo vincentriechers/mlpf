@@ -4,17 +4,10 @@
 #
 # CSV columns (nvidia-smi --format=csv,noheader,nounits):  index, util.gpu, memory.used(MiB)
 #
-# `skip_seconds` drops the first N samples per GPU, which are job startup (model
-# build, first data fetch) and would drag the mean down; default 45, matching the
-# ~40 s startup these jobs show before step 10.
-#
-# What to look for:
-#   mean util   high (>85 %) = compute-bound, the GPU is the bottleneck: good.
-#               low  (<60 %) = starved, almost always the data loader here.
-#   %% idle      fraction of samples at 0 % util — this is the smoking gun for
-#               loader stalls; it was ~45 % before NUM_WORKERS/PREFETCH_FACTOR
-#               were raised.
-#   peak mem    against 65 536 MiB tells you the batch-size headroom.
+# `skip_seconds` (default 45) drops the first N samples per GPU — job startup,
+# which would drag the mean down. Mean util above ~85 % is compute-bound;
+# below ~60 % the loader is starving the GPUs, which the '% idle' column
+# confirms. Peak mem against 65 536 MiB is the batch-size headroom.
 set -uo pipefail
 CSV=${1:?usage: gpu_util_summary.sh <csv> [skip_seconds]}
 SKIP=${2:-45}

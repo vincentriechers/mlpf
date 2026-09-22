@@ -1,42 +1,17 @@
 #!/bin/bash
 # =============================================================================
 # DELPHI FULL evaluation — stage-1 clustering + stage-2 EC/PID GRAFTED together.
-#
-# This is the configuration the four-way comparison actually needs. Stage-1
-# alone gives raw CALORIMETER DEPOSITS: tracks contribute exactly zero energy
-# (dataclasses.py:123 `e_tracks = X_track[:,5]*0`, summed at
-# inference_oc.py:705), so charged particles — 55 % of the visible energy — are
-# measured by the calorimeter instead of by their track. DELANA uses track
-# momentum. The stage-2 EC is the first thing that sees `track_p`
-# (post_clustering_features.py:47), which is why only the grafted model can
-# plausibly beat DELANA.
-#
-# The graft is done by train_lightning1.py:236 (`_netcfg_aware` branch):
-#   --load-model-weights            <stage-2 EC/PID checkpoint>   loaded FIRST,
-#                                    shape-matched keys only
-#   --load-model-weights-clustering <stage-1 clustering ckpt>     overwrites the
-#                                    clustering backbone afterwards
-# Order matters: the EC checkpoint carries its own throwaway clustering backbone
-# (trained on GT clusters) which must be replaced by the real one.
+# This is the configuration the model/DELANA comparison needs: stage 1 alone
+# reports calorimeter deposits with tracks contributing exactly zero energy,
+# and the stage-2 EC is the first thing that sees track_p.
 #
 #   MODEL=hitpf  EC_CKPT=... CLUST_CKPT=... sbatch scripts/bsc/eval_delphi_full.sh
 #   MODEL=mask3d EC_CKPT=... CLUST_CKPT=... sbatch ...
 #
-# WATCH THE TWO LOAD LINES. load_test_model prints how many keys each checkpoint
-# contributed; the EC line should report ~0 EC-head keys skipped. It loads with
-# strict=False, so a mismatch is silent.
-#
-# EVENT ORDER IN THE OUTPUT DATAFRAME IS NOT SORTED-FILE ORDER.
-# `--num-workers 4` makes the DataLoader round-robin one event from each of four
-# open parquets, so `number_batch` indexes the STREAM, not the file list:
-#   stream i  ->  file (i%4 + 4*((i//4)//100)), event ((i//4)%100)
-# Verified on the HitPF and Mask3D full evals, 4800/4800 events. Any analysis
-# that joins this dataframe to the parquets positionally (truth, DELANA) is then
-# comparing each event against a DIFFERENT event, which inflated every model
-# sigma68 in this project by ~32% (HitPF read 0.201 instead of 0.152).
-# `analysis/three_way_visible_energy.py` now recovers and verifies the
-# permutation itself, so existing dataframes are usable as they are. Setting
-# --num-workers 1 here would also fix it, at ~4x the wall clock.
+# LOAD ORDER MATTERS — EC checkpoint first, clustering second, which overwrites
+# the throwaway backbone the EC checkpoint carries (train_lightning1.py:236).
+# Both loads are strict=False: watch the two `loaded N/M keys` lines.
+# Event order in the output is NOT sorted-file order (--num-workers 4).
 # =============================================================================
 #SBATCH --job-name=delphi_eval_full
 #SBATCH --output=/gpfs/scratch/ehpc1013/vriecher/slurm-logs/%x-%j.out
@@ -83,7 +58,7 @@ CLUST_CKPT=${CLUST_CKPT:?set CLUST_CKPT to the stage-1 checkpoint}
 MODEL_DIR=${MODEL_DIR:-$SCR/trained-models/fulleval_${MODEL}}
 RUN_NAME=${RUN_NAME:-fulleval_${MODEL}}
 OUTPUT_NAME=${OUTPUT_NAME:-eval_full_${MODEL}.pkl}
-VAL_DIR=$SCR/data/50k_validation_delana/digitized
+VAL_DIR=${VAL_DIR:-$SCR/data/50k_validation_delana/digitized}
 N_EVAL_FILES=${N_EVAL_FILES:-20}
 mapfile -t ALL < <(ls -1 "$VAL_DIR"/pf_tree_*.parquet)
 DATA_FILES=("${ALL[@]:0:$N_EVAL_FILES}")

@@ -1,33 +1,21 @@
 #!/bin/bash
 # =============================================================================
-# DELPHI plain MASK3D (encoder + MaskFormerDecoder) — BSC MareNostrum 5.
+# DELPHI plain MASK3D (InputNet + encoder + MaskFormerDecoder) stage 1 — BSC.
+# NOT the same model as smoke_delphi_attn_ipa.sh (attention backbone + IPA
+# decoder). Built through mask3d_model.ExampleWrapper with use_ipa_decoder
+# False — the maintained superset, and the only one carrying the evaluation
+# path, the EC adapter and ranger/lion, so `-o use_ipa_decoder True` keeps the
+# A/B open with checkpoint-compatible plumbing.
 #
-# This is the recommended upstream variant ("train a mask3d model"), and it is
-# NOT what scripts/bsc/smoke_delphi_attn_ipa.sh trains. The three are different
-# models, not spellings of one:
+#   sbatch scripts/bsc/train_delphi_mask3d.sh
 #
-#   Mask3D    InputNet+encoder + MaskFormerDecoder (iterative mask attention)
-#             -> mask3d_model.ExampleWrapper, use_ipa_decoder=False   <-- THIS
-#   GATr-IPA  GATr backbone + IPADecoder  (variant A/B)
-#   Attn-IPA  attention backbone + IPADecoder (variant C)
-#             -> attn_ipa_model.AttnIPAModel
+# Env: RUN_NAME, NUM_QUERIES, TRACK_LOSS_WEIGHT, WINDOW_SIZE, GPUS_PER_NODE,
+#      GPU_LIST, MASTER_PORT, NETWORK_OPTS
 #
-# Use mask3d_model rather than the standalone variant files: it is the
-# maintained superset (1248 lines / 78 kwargs vs 420 / 48) and the only one
-# carrying the evaluation path, the EC adapter, ranger/lion — AND it can build
-# the IPA decoder via `-o use_ipa_decoder True`, so training through it keeps
-# the A/B open with checkpoint-compatible plumbing.
-#
-# SHARED KNOB WORTH KNOWING: both decoders seed queries with a FIXED
-# `keys.norm(dim=-1)` topk (decoder.py:426). The learnable queryness head was
-# removed because topk consumes only `.indices`, so it could never learn and it
-# tripped DDP's unused-params check (job 40330284). Consequence: with
-# num_queries=320 against ~56 truth objects/event, a large shower's many
-# high-norm hits attract many seeds -> the shower fragments across queries.
-# Measured on the 1-epoch Attn-IPA model: efficiency FALLS with energy
-# (0.63 -> 0.42), <E_pred/E_true> = 0.33 on charged hadrons, 42 % fakes against
-# HitPF's 4 %. Plain Mask3D shares this mechanism; it is not fixed for free.
-# NUM_QUERIES is therefore the first knob to scan, not the last.
+# NUM_QUERIES is the first knob to scan, not the last: both decoders seed
+# queries from a FIXED keys.norm topk (decoder.py:426), so at the 320 default
+# against ~56 truth objects/event a large shower attracts many seeds and
+# fragments across queries.
 # =============================================================================
 #SBATCH --job-name=delphi_mask3d
 #SBATCH --output=/gpfs/scratch/ehpc1013/vriecher/slurm-logs/%x-%j.out
@@ -64,6 +52,7 @@ NETWORK_OPTS=${NETWORK_OPTS:-}
 
 mkdir -p $SCR/wandb $SCR/slurm-logs $SCR/trained-models/${RUN_NAME}
 cd "$REPO" || exit 1
+echo "[data] train=${DATA_TRAIN:-$SCR/data/500k_delana/digitized/}"
 echo "[mask3d] host=$(hostname) gpus=$GPUS_PER_NODE list=$GPU_LIST"
 echo "[mask3d] run=$RUN_NAME epochs=${NUM_EPOCHS:-1} train_batches=${TRAIN_BATCHES:-50} batch=${BATCH_SIZE:-64}"
 echo "[mask3d] num_queries=$NUM_QUERIES track_loss_weight=$TRACK_LOSS_WEIGHT window_size=$WINDOW_SIZE amp='${AMP_FLAG:-off}' opts='$NETWORK_OPTS'"
@@ -84,7 +73,7 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
     --rdzv_id="$SLURM_JOB_ID" --node_rank="$SLURM_PROCID" \
     -m src.train_lightning1 \
       --delphi \
-      --data-train "$SCR/data/500k_delana/digitized/" \
+      --data-train "${DATA_TRAIN:-$SCR/data/500k_delana/digitized/}" \
       --data-config config_files/config_hits_track_delphi.yaml \
       --network-config src/models/wrapper/example_mode_mask3d.py \
       --model-prefix "$SCR/trained-models/${RUN_NAME}" \

@@ -41,6 +41,7 @@ RUN_NAME=${RUN_NAME:-delphi_hitpf_smoke}
 mkdir -p $SCR/wandb $SCR/trained-models $SCR/slurm-logs
 
 cd "$REPO" || exit 1
+echo "[data] train=${DATA_TRAIN:-$SCR/data/500k_delana/digitized/}"
 echo "[smoke] host=$(hostname) gpus=$GPUS_PER_NODE python=$PY"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
@@ -56,7 +57,7 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
     --node_rank="$SLURM_PROCID" \
     -m src.train_lightning1 \
       --delphi \
-      --data-train "$SCR/data/500k_delana/digitized/" \
+      --data-train "${DATA_TRAIN:-$SCR/data/500k_delana/digitized/}" \
       --data-config config_files/config_hits_track_delphi.yaml \
       --network-config src/models/wrapper/example_mode_gatr_noise.py \
       --model-prefix "$SCR/trained-models/${RUN_NAME}" \

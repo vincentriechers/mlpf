@@ -1,39 +1,18 @@
 #!/bin/bash
 # =============================================================================
-# DELPHI DPC knob scan — MANY POINTS IN ONE JOB.
-#
-# `acc_debug` allows exactly one job per user, so a one-point-per-job scan is
-# serialised by the queue at ~6 min of queue+startup per point. This runs the
-# whole grid inside a single allocation instead: the model and the parquets are
-# re-read per point (the eval entrypoint is not re-enterable), but the queue
-# wait is paid once.
-#
-# The knobs live in `inference_oc.DPC_custom_CLD` and are read from the
-# environment, so this is POST-HOC on an existing checkpoint — no retraining.
+# DELPHI post-hoc knob scan — MANY POINTS IN ONE JOB, because acc_debug allows
+# exactly one job per user. Post-hoc on an existing checkpoint: no retraining.
 #
 #   POINTS='label:KEY=VAL[,KEY=VAL...] ...' sbatch scripts/bsc/scan_dpc_grid.sh
-#
-# Each point is a label plus the environment to set for it, so this scans any
-# post-hoc knob, not just the DPC ones. The legacy form `label:delta:rho` is
-# still accepted and means DPC_DELTA_MIN/DPC_RHO_MIN.
-#
 #   POINTS='base:DPC_DELTA_MIN=0.10 nobtr:DPC_DELTA_MIN=0.10,BAD_TRACK_REMOVAL=0'
+# Each point is a label plus the environment to set for it, so this scans any
+# post-hoc knob. The legacy form `label:delta:rho` means DPC_DELTA_MIN/RHO_MIN.
 #
 # Env: POINTS, MODEL_DIR, CKPT, N_EVAL_FILES, TAG, DEBUG_RHO_FIRST, EXTRA_ENV, MODE
 #
-# MODE=clust (default) evaluates stage 1 alone -- fast (~6 min / 20 files), and
-# the right mode for anything that only changes CLUSTERING. MODE=full grafts the
-# stage-2 EC/PID head on (EC_CKPT + CLUST_CKPT, ~13 min / 20 files) and is the
-# only mode that can see a TRACK effect at all: stage-1 energy is calorimeter
-# deposits only (`dataclasses.py:123` zeroes `e_tracks`), so a knob that changes
-# which tracks land in which cluster moves nothing in a MODE=clust sigma68.
-#
-# Why rho_min is worth a decade scan and not a +/-2x one:
-#   local_density_energy sums e_hits inside d_c, so `rho` carries GeV. The
-#   0.05 default is therefore an ABSOLUTE energy-density cut inherited from CLD,
-#   whose cells are far more energetic than DELPHI's ~15 MeV ones. Set
-#   DEBUG_RHO_FIRST=1 to print the per-event rho percentiles for the first point
-#   and see where 0.05 actually falls.
+# MODE=clust (default) is stage 1 alone, ~6 min / 20 files — the right mode for
+# anything that only changes CLUSTERING. MODE=full grafts stage 2 on (EC_CKPT +
+# CLUST_CKPT, ~13 min) and is the ONLY mode in which a TRACK effect is visible.
 # =============================================================================
 #SBATCH --job-name=dpc_grid
 #SBATCH --output=/gpfs/scratch/ehpc1013/vriecher/slurm-logs/%x-%j.out
@@ -137,9 +116,14 @@ DEBUG_RHO_FIRST=${DEBUG_RHO_FIRST:-1}
 # label:delta_min:rho_min   (defaults: the 2x3 grid described above)
 POINTS=${POINTS:-"d40r5e2:0.4:0.05 d40r5e3:0.4:0.005 d40r5e4:0.4:0.0005 d10r5e2:0.10:0.05 d10r5e3:0.10:0.005 d10r5e4:0.10:0.0005"}
 
-VAL_DIR=$SCR/data/50k_validation_delana/digitized
+VAL_DIR=${VAL_DIR:-$SCR/data/50k_validation_delana/digitized}   # override to evaluate a curated file set
 mapfile -t ALL < <(ls -1 "$VAL_DIR"/pf_tree_*.parquet)
-DATA_FILES=("${ALL[@]:0:$N_EVAL_FILES}")
+# SKIP_FILES drops the first N before taking N_EVAL_FILES, so the same curated
+# directory can serve a TUNE half and a disjoint held-back TEST half. The
+# analysis side takes the same two numbers (`--skip-files` / `--n-files` in
+# delphi_converter/analysis/mask3d_variants.py) so the truth it aligns against
+# is the same file set the eval actually read.
+DATA_FILES=("${ALL[@]:${SKIP_FILES:-0}:$N_EVAL_FILES}")
 [[ ${#DATA_FILES[@]} -eq 0 ]] && { echo "no parquets in $VAL_DIR" >&2; exit 2; }
 [[ -f "$CKPT" ]] || { echo "no checkpoint at $CKPT" >&2; exit 2; }
 
@@ -148,7 +132,7 @@ cd "$REPO" || exit 1
 echo "[scan] model  : $MODEL   ($NETCFG)"
 echo "[scan] mode   : $MODE"
 echo "[scan] ckpt   : $CKPT"
-echo "[scan] files  : ${#DATA_FILES[@]} from $VAL_DIR"
+echo "[scan] files  : ${#DATA_FILES[@]} from $VAL_DIR (skip ${SKIP_FILES:-0}) -- ${DATA_FILES[0]##*/} .. ${DATA_FILES[-1]##*/}"
 echo "[scan] points : $POINTS"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
@@ -157,7 +141,9 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 SCAN_KNOBS=(DPC_D_C DPC_RHO_MIN DPC_DELTA_MIN DPC_CORE_R DPC_NMS DPC_DEBUG_RHO
             BAD_TRACK_REMOVAL BAD_TRACK_SIGMA BAD_TRACK_STATS ADD_LONELY_TRACKS
             EVAL_CLS_THRESHOLD EVAL_MASK_THRESHOLD FORCE_TRACK_ASSIGNMENT
-            M3D_VALID_ARGMAX M3D_DEBUG_LABELS EC_CKPT_OVERRIDE)
+            M3D_VALID_ARGMAX M3D_DEBUG_LABELS EC_CKPT_OVERRIDE CLUST_CKPT_OVERRIDE
+            CLUSTER_POST POST_TRACK_ATTACH_R POST_TRACK_ATTACH_ANY POST_TRACK_LONELY POST_TRACK_LONELY_PMAX
+            POST_STATS POST_RECHECK LONELY_TRACK_PMAX)
 
 first=1
 for pt in $POINTS; do
@@ -184,6 +170,9 @@ for pt in $POINTS; do
     # occurrence of a `store` argument and PT_ARGS is appended after MODE_ARGS,
     # so this overrides the job-level --load-model-weights.
     [[ -n "${EC_CKPT_OVERRIDE:-}" ]] && PT_ARGS+=(--load-model-weights "$EC_CKPT_OVERRIDE")
+    # same trick for the clustering backbone: compare two stage-1 checkpoints
+    # inside one allocation, everything else held fixed.
+    [[ -n "${CLUST_CKPT_OVERRIDE:-}" ]] && PT_ARGS+=(--load-model-weights-clustering "$CLUST_CKPT_OVERRIDE")
     OUT="eval_${TAG}_${LBL}.pkl"
     echo "=============================================================="
     echo -n "[scan] point=$LBL  env:"

@@ -1,50 +1,24 @@
 #!/bin/bash
 # =============================================================================
-# DELPHI STAGE 2 — energy correction + PID — on BSC MareNostrum 5.
-#
+# DELPHI STAGE 2 — energy correction + PID — BSC MareNostrum 5.
 # Port of scripts/scripts_vincent/train_properties_delphi.sh (Baobab,
-# apptainer) to BSC, with the same physics flags.
+# apptainer) with the same physics flags.
 #
-# >>> STAGE 2 DOES NOT DEPEND ON STAGE 1. IT CAN RUN RIGHT NOW. <<<
-# The recipe trains the EC/PID heads on GROUND-TRUTH clusters
-# (`--use-gt-clusters`) with the clustering backbone frozen
-# (`--freeze-clustering`), and it passes NO --load-model-weights. So the
-# clustering quality is irrelevant to this stage; the two trainings are
-# independent and can run in parallel.
+# >>> STAGE 2 DOES NOT DEPEND ON STAGE 1. <<< It trains the EC/PID heads on
+# ground-truth clusters (--use-gt-clusters) with the clustering backbone frozen
+# (--freeze-clustering) and loads no checkpoint, so the two trainings are
+# independent and can run in parallel. The stage-1 checkpoint is needed only at
+# full evaluation, where eval_delphi_full.sh grafts the two together.
 #
-# The stage-1 checkpoint is needed only at FULL EVALUATION, where
-# train_lightning1.py grafts the two together:
-#     --load-model-weights            <this stage-2 EC/PID checkpoint>
-#     --load-model-weights-clustering <the stage-1 clustering checkpoint>
-# (see the `_netcfg_aware` branch, train_lightning1.py:236).
+#   sbatch scripts/bsc/train_delphi_stage2.sh
+#   PID_WEIGHTING_NEUTRAL=sqrt_inv sbatch ...        # neutral head only
+#   PID_WEIGHTING=sqrt_inv SOFT_MUON_CUT=1.5 sbatch ...   # everything at once
 #
-# TWO FLAGS THAT ARE NOT WHAT THEY LOOK LIKE
-#
-#  * `--balance-pid-classes` is a NO-OP for this model. It is only read in
-#    Gatr_pf_e.py:864/882, and our --network-config is
-#    example_mode_gatr_noise.py -> Gatr_pf_e_noise.py, which routes the PID loss
-#    through energy_correction_NN_v1.pid_loss_weighted instead. It is passed
-#    below only to stay faithful to the reference recipe; it does nothing here.
-#    The knob that DOES work on this path is `--pid-class-weighting`.
-#  * `--add-track-chis` is REQUIRED: energy_correction_NN_v1.py:358 asserts it.
-#
-# Class weighting is OFF by default, reproducing the previous behaviour exactly.
-# The two heads have DIFFERENT balance, so they get separate knobs — see
-# `delphi_converter/analysis/pid_class_balance.py`, measured on 2500 events:
-#
-#   charged [0,1,4]  e 50.3% obj / 20.5% E | chg.had 47.3 / 77.1 | mu 2.3 / 2.4
-#                    21x count imbalance, but muons carry energy in PROPORTION
-#                    to their count -> weak case for reweighting
-#   neutral [2,3]    neutral hadron 16.8% obj / 33.8% E | photon 83.2 / 66.2
-#                    only 5x imbalance, but neutral hadrons carry TWICE their
-#                    share of the energy, and are exactly where particle flow
-#                    should beat DELANA -> REAL case for reweighting
-#
-# Recommended starting point:
-#     PID_WEIGHTING_NEUTRAL=sqrt_inv sbatch ...          # neutral head only
-# Everything at once (more aggressive):
-#     PID_WEIGHTING=sqrt_inv SOFT_MUON_CUT=1.5 sbatch ...
-# Validate against visible-energy/mass resolution, NOT the PID confusion matrix.
+# TWO FLAGS ARE NOT WHAT THEY LOOK LIKE: --add-track-chis is REQUIRED (asserted
+# at energy_correction_NN_v1.py:358), and --balance-pid-classes is a NO-OP on
+# this network-config — the knob that works is --pid-class-weighting. Class
+# weighting is OFF by default. Validate any reweighting against visible-energy
+# and mass resolution, NOT against the PID confusion matrix.
 # =============================================================================
 #SBATCH --job-name=delphi_stage2
 #SBATCH --output=/gpfs/scratch/ehpc1013/vriecher/slurm-logs/%x-%j.out
@@ -108,9 +82,11 @@ OPTIMIZER=${OPTIMIZER:-ranger}
 
 mkdir -p "$SCR/wandb" "$SCR/slurm-logs" "$SCR/trained-models/${RUN_NAME}"
 cd "$REPO" || exit 1
+echo "[data] train=${DATA_TRAIN:-$SCR/data/500k_delana/digitized/}"
 echo "[stage2] host=$(hostname) gpus=$GPUS_PER_NODE list=$GPU_LIST"
 echo "[stage2] network-config=$NETWORK_CONFIG optimizer=$OPTIMIZER opts='$NETWORK_OPTS'"
 echo "[stage2] batch=$BATCH_SIZE x $GPUS_PER_NODE = $EFF_BATCH   start_lr=$START_LR"
+echo "[stage2] EC_NEUTRAL_INDIST=${EC_NEUTRAL_INDIST:-0.6 (default)} seed=${SEED:-none}"
 echo "[stage2] pid_class_weighting=$PID_WEIGHTING charged=${PID_WEIGHTING_CHARGED:-<global>} neutral=${PID_WEIGHTING_NEUTRAL:-<global>}  soft_muon_cut=$SOFT_MUON_CUT"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
 
@@ -135,7 +111,7 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
     --node_rank="$SLURM_PROCID" \
     -m src.train_lightning1 \
       --delphi \
-      --data-train "$SCR/data/500k_delana/digitized/" \
+      --data-train "${DATA_TRAIN:-$SCR/data/500k_delana/digitized/}" \
       --data-config config_files/config_hits_track_delphi.yaml \
       --network-config "$NETWORK_CONFIG" \
       --model-prefix "$SCR/trained-models/${RUN_NAME}" \

@@ -1,58 +1,24 @@
 #!/bin/bash
 # =============================================================================
-# DELPHI Mask3D / Attn-IPA — BSC MareNostrum 5 SMOKE RUN.
+# DELPHI Mask3D / Attn-IPA stage 1 — BSC MareNostrum 5.
+# Sibling of smoke_delphi_hitpf.sh: the chain up to the model is shared (env ->
+# parquet loader -> DELPHI dgl graph); Mask3D then replaces the OC head with
+# query-based Hungarian matching + mask BCE/dice, so the loss-side flags differ
+# completely. Defaults to a smoke run on acc_debug; the 4-GPU production run
+# goes through this same script (see the howto for the exact export line).
 #
-# Sibling of smoke_delphi_hitpf.sh, which proves the SAME chain for the
-# object-condensation (HitPF) model. Everything up to the model is shared:
-# env -> parquet loader -> DELPHI dgl graph. Mask3D then replaces the OC head
-# with query-based Hungarian matching + mask BCE/dice, so the loss-side flags
-# are completely different. The differences that MATTER, all read off the code:
+#   sbatch scripts/bsc/smoke_delphi_attn_ipa.sh
 #
-#   --optimizer adamW      REQUIRED. attn_ipa_model.py:358 configure_optimizers
-#                          raises ValueError on anything that is not adam/adamw.
-#                          (The HitPF script uses `ranger`; copying it crashes.)
-#   --gradient-clip-val    REQUIRED in practice. train_lightning1.py:117 records
-#                          NaN/Inf crashes inside scipy.linear_sum_assignment
-#                          ~36k steps into a no-clip H100/bf16 run. The parser
-#                          default is 0.0 (= disabled), so it must be passed.
-#   --train-batches        Does double duty: Trainer.limit_train_batches AND
-#                          OneCycleLR total_steps (= num_epochs * train_batches,
-#                          attn_ipa_model.py:371). Never leave it implicit.
-#   --num-epochs           Reads NUM_EPOCHS. This was hardcoded to 1, so job
-#                          45073180 was launched with NUM_EPOCHS=16 and quietly
-#                          trained ONE epoch — exit 0, zero errors, a complete
-#                          OneCycle schedule over 1914 steps instead of 30 624.
-#                          Nothing looked wrong; it was simply 1/16 of the
-#                          intended training. Check the `[smoke]` echo below
-#                          against what you exported.
-#   -o track_loss_weight   The Mask3D analogue of --beta-noise-weight-track.
-#                          loss.py:411-423 turns it into a per-hit weight of
-#                          `track_loss_weight` on hits with hit_type ==
-#                          track_hit_type (1 = tracks for DELPHI) and 1.0
-#                          elsewhere. DELPHI is ~29 tracks vs ~500 calo hits
-#                          (5.5% of nodes), so the 1.0 default in
-#                          attn_ipa_model.py:65 leaves tracks drowned; 3.0 is
-#                          the value mask3d_model.py:216 defaults to.
-#   no --condensation      OC-only flag, and dead in this entrypoint anyway
-#                          (only src/deprecated/* reads args.condensation).
-#   no --qmin / --frac_cluster_loss / --use-average-cc-pos
-#                          OC clustering knobs; Mask3D never reads them.
-#   -o window_size None    REQUIRED HERE, and correct on the physics too.
-#                          encoder.py picks its attention kernel off this knob:
-#                          None -> BlockDiagonalSelfAttention (xformers, which
-#                          the mlpf-overlay provides), any int -> phi-windowed
-#                          FlashVarlenSelfAttention, which imports `flash_attn`
-#                          — NOT in the BSC env, so the 1024 default dies with
-#                          ModuleNotFoundError in the first forward (job
-#                          45068276). Installing flash-attn would buy nothing:
-#                          a DELPHI event is ~502 calo hits + ~29 tracks ~= 531
-#                          tokens, so a +/-512 sliding window already spans the
-#                          whole event. The windowing exists for CLD-scale
-#                          events (~10k hits); at DELPHI scale full-event
-#                          attention is the same computation without the
-#                          dependency.
+# Env: RUN_NAME, BATCH_SIZE, TRAIN_BATCHES, NUM_EPOCHS, START_LR, SEED,
+#      TRACK_LOSS_WEIGHT, WINDOW_SIZE, GRAD_CLIP, NUM_WORKERS, PREFETCH_FACTOR,
+#      GPUS_PER_NODE, GPU_LIST, NETWORK_OPTS (extra `-o k v` pairs)
 #
-# Runs on acc_debug (2 h cap, priority 10000) so it jumps the queue.
+# FOUR FLAGS ARE LOAD-BEARING: --optimizer adamW (anything else raises at
+# configure_optimizers), -o window_size None (any int needs flash_attn, which
+# the BSC env does not have), --gradient-clip-val (parser default 0.0 = off,
+# and unclipped bf16 runs hit NaN in linear_sum_assignment), --train-batches
+# (it is also OneCycleLR's total_steps). Check the `[smoke]` echo against what
+# was exported — NUM_EPOCHS was once ignored and quietly trained one epoch.
 # =============================================================================
 #SBATCH --job-name=delphi_attn_ipa_smoke
 #SBATCH --output=/gpfs/scratch/ehpc1013/vriecher/slurm-logs/%x-%j.out
@@ -91,8 +57,9 @@ export NUMEXPR_NUM_THREADS=${NUMEXPR_NUM_THREADS:-20}
 #   GPUS_PER_NODE=4 GPU_LIST=0,1,2,3 sbatch --export=ALL \
 #       --gres=gpu:4 --cpus-per-task=80 scripts/bsc/smoke_delphi_attn_ipa.sh
 # GPU_LIST must list every GPU: set_gpus splits it into Trainer(devices=...).
-# Then CHECK the [shard] lines — ranks must be distinct and world_size must
-# equal the GPU count (see the sharding note in bsc_training_howto.md).
+# Then CHECK the [shard] lines — ranks must be distinct, world_size must
+# equal the GPU count, and files must be total/world_size. Getting this
+# wrong is silent: DDP runs and the loss falls on 1/N of the data.
 GPUS_PER_NODE=${GPUS_PER_NODE:-1}
 GPU_LIST=${GPU_LIST:-0}
 MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
@@ -110,6 +77,7 @@ NETWORK_OPTS=${NETWORK_OPTS:-}
 mkdir -p $SCR/wandb $SCR/trained-models $SCR/slurm-logs
 
 cd "$REPO" || exit 1
+echo "[data] train=${DATA_TRAIN:-$SCR/data/500k_delana/digitized/}"
 echo "[smoke] host=$(hostname) gpus=$GPUS_PER_NODE list=$GPU_LIST python=$PY"
 echo "[smoke] run=$RUN_NAME epochs=${NUM_EPOCHS:-1} train_batches=${TRAIN_BATCHES:-50} batch=${BATCH_SIZE:-8} track_loss_weight=$TRACK_LOSS_WEIGHT window_size=$WINDOW_SIZE amp='${AMP_FLAG:-off}' opts='$NETWORK_OPTS'"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
@@ -143,7 +111,7 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
     --node_rank="$SLURM_PROCID" \
     -m src.train_lightning1 \
       --delphi \
-      --data-train "$SCR/data/500k_delana/digitized/" \
+      --data-train "${DATA_TRAIN:-$SCR/data/500k_delana/digitized/}" \
       --data-config config_files/config_hits_track_delphi.yaml \
       --network-config src/models/wrapper/example_mode_attn_ipa.py \
       --model-prefix "$SCR/trained-models/${RUN_NAME}" \
