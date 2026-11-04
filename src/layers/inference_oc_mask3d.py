@@ -22,6 +22,7 @@ from src.layers.postprocess_labels import postprocess_labels
 from src.layers.inference_oc import (
     match_showers,
     generate_showers_data_frame,
+    predicted_clusters_data_frame,
     store_at_batch_end,
     get_labels_pandora,
     _fix_labels_for_classes,
@@ -329,7 +330,17 @@ def create_and_store_graph_output_mask3d(
                 labels_pandora, dic, particle_ids, ev_mask_logits,
                 local_rank, i, path_save, pandora=True, tracks=tracks,
             )
-        if len(shower_p_unique) > 1:
+        if os.environ.get("PREDICT_NO_TRUTH", "") == "1":
+            # Recorded data: no truth to match, one row per predicted cluster (as in
+            # inference_oc.create_and_store_graph_output). The EC outputs are in cluster-label
+            # order because utils_training switches the matching off in the same mode.
+            df_event1 = predicted_clusters_data_frame(
+                dic, labels, e_corr, total_number_events,
+                pred_pid=pred_pid, pred_pos=pred_pos)
+            if len(df_event1):
+                df_list1.append(df_event1)
+            total_number_events += 1
+        elif len(shower_p_unique) > 1:
             df_event1, number_of_showers_total1, number_of_fake_showers_total1 = generate_showers_data_frame(
                 labels,
                 dic,

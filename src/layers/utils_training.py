@@ -251,6 +251,12 @@ def obtain_clustering_for_matched_showers(
         )
         row_ind = torch.Tensor(row_ind).to(model_output.device).long()
         col_ind = torch.Tensor(col_ind).to(model_output.device).long()
+        if os.environ.get("PREDICT_NO_TRUTH", "") == "1":
+            # Recorded data: there is no truth to match. Every cluster is treated as unmatched, so the
+            # energy-correction outputs come out in cluster-label order, which is what
+            # inference_oc.predicted_clusters_data_frame assumes. A match to the placeholder particle
+            # (functions_graph._no_truth_placeholder) would otherwise move one cluster to the front.
+            row_ind, col_ind = row_ind[:0], col_ind[:0]
         if torch.sum(particle_ids == 0) > 0:
             row_ind_ = row_ind - 1
         else:

@@ -361,6 +361,71 @@ def generate_random_string(length):
     return "".join(random.choice(letters) for i in range(length))
 
 
+TRACK_HIT_TYPE_IOC = 1
+
+
+def predicted_clusters_data_frame(dic, labels, e_corr, number_in_batch,
+                                  pred_pid=None, pred_pos=None):
+    """One row per PREDICTED cluster, with no truth involved.
+
+    The normal path (`generate_showers_data_frame`) builds rows by matching predicted clusters to
+    truth particles, so it produces nothing on recorded data, where there is no truth at all: the
+    per-event gate `len(shower_p_unique_hdb) > 1` is never satisfied and the frame comes out empty.
+    Everything before that step already works on data -- clustering, track promotion and the
+    energy-correction head all run -- so only the bookkeeping needs a truth-free variant.
+
+    Truth-derived columns (`true_showers_E`, `pid`, `is_track_correct`, ...) are absent by
+    construction; what is written is what a reconstruction on data can know. `calibrated_E` is
+    taken from the energy-correction head when its length matches the cluster count (batch size 1,
+    every cluster unmatched, so `e_corr` is the per-cluster vector); otherwise the summed cell
+    energy is used and the column `calibrated_from` records which.
+    """
+    import pandas as pd
+
+    g = dic["graph"]
+    lab = labels.view(-1).long()
+    n_cl = int(lab.max().item()) if lab.numel() else 0
+    if n_cl < 1:
+        return pd.DataFrame()
+    is_trk = g.ndata["hit_type"].view(-1) == TRACK_HIT_TYPE_IOC
+    e = g.ndata["e_hits"].view(-1).float()
+    p = g.ndata["p_hits"].view(-1).float() if "p_hits" in g.ndata else torch.zeros_like(e)
+
+    idx = torch.arange(1, n_cl + 1, device=lab.device)
+    onehot = lab.view(-1, 1) == idx.view(1, -1)                     # (n_node, n_cl)
+    calo = onehot & (~is_trk).view(-1, 1)
+    trk = onehot & is_trk.view(-1, 1)
+    e_calo = (e.view(-1, 1) * calo).sum(0)
+    n_trk = trk.sum(0)
+    p_trk = (p.view(-1, 1) * trk).sum(0)
+
+    ec = e_corr.view(-1).detach().cpu() if e_corr is not None else None
+    if ec is not None and len(ec) == n_cl:
+        cal, src = ec.numpy(), "ec_head"
+    else:
+        cal, src = e_calo.detach().cpu().numpy(), "sum_cells"
+
+    out = {
+        "number_batch": np.full(n_cl, int(number_in_batch)),
+        "pred_showers_E": e_calo.detach().cpu().numpy(),
+        "calibrated_E": cal,
+        "is_track_in_cluster": n_trk.detach().cpu().numpy(),
+        "track_p_in_cluster": p_trk.detach().cpu().numpy(),
+        "calibrated_from": np.full(n_cl, src),
+    }
+    if pred_pid is not None and len(pred_pid.view(-1)) == n_cl:
+        out["pred_pid_matched"] = pred_pid.view(-1).detach().cpu().numpy()
+    # cell counts and ECAL cell energy per cluster (hit_type 2 = ECAL, 3 = HCAL), and the predicted
+    # direction: what the visible mass and the per-calorimeter diagnosis on recorded data need
+    ht = g.ndata["hit_type"].view(-1, 1)
+    out["ECAL_hits"] = (onehot & (ht == 2)).sum(0).detach().cpu().numpy()
+    out["HCAL_hits"] = (onehot & (ht == 3)).sum(0).detach().cpu().numpy()
+    out["pred_showers_E_ecal"] = (e.view(-1, 1) * (onehot & (ht == 2))).sum(0).detach().cpu().numpy()
+    if pred_pos is not None and len(pred_pos) == n_cl:
+        out["pred_pos_matched"] = pred_pos.detach().cpu().tolist()
+    return pd.DataFrame(out)
+
+
 def create_and_store_graph_output(
     batch_g,
     model_output,
@@ -504,7 +569,15 @@ def create_and_store_graph_output(
                 create_and_store_graph_output._n_saved = _n_saved + 1
                 print("DUMP_GRAPHS: saved event", _n_saved, "->", path_save + "/graphs_v3/")
 
-        if len(shower_p_unique_hdb) > 1:
+        if os.environ.get("PREDICT_NO_TRUTH", "") == "1":
+            # recorded data: no truth exists, so the matching gate below can never fire.
+            df_event1 = predicted_clusters_data_frame(
+                dic, labels_hdb, e_corr, total_number_events,
+                pred_pid=pred_pid, pred_pos=pred_pos)
+            if len(df_event1):
+                df_list1.append(df_event1)
+            total_number_events = total_number_events + 1
+        elif len(shower_p_unique_hdb) > 1:
             # df_event, number_of_showers_total = generate_showers_data_frame(
             #     labels_clustering,
             #     labels_clustering,

@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import torch
 import dgl
@@ -19,9 +20,34 @@ except ImportError:
     _DIFFUSION_GEOMETRY_AVAILABLE = False
 
 
+def _no_truth_placeholder(output):
+    """Recorded data (PREDICT_NO_TRUTH=1): give an event without generator particles one placeholder.
+
+    The graph builder needs at least one particle owning hits, or the event is dropped as empty. The
+    placeholder is a photon carrying the summed hit energy that owns every calorimeter hit; every track
+    stays unlabelled (-1), one entry per track, which also repairs exports that wrote ygen_track with
+    length 0. Nothing truth-derived reaches the output: the no-truth dataframe path writes predicted
+    clusters only, and cluster-to-truth matching is switched off in the same mode.
+    """
+    import awkward as ak
+    x_hit = np.asarray(ak.to_numpy(output["X_hit"]))
+    n_trk = len(output["X_track"])
+    y_hit = np.asarray(ak.to_numpy(output["ygen_hit"]))
+    e_tot = float(x_hit[:, 5].sum()) if len(x_hit) else 1.0
+    gen = np.zeros((1, 21), dtype=x_hit.dtype if len(x_hit) else np.float64)
+    gen[0, 0], gen[0, 8], gen[0, 9], gen[0, 14] = 22.0, e_tot, 1.0, e_tot   # PDG, E, status, pz
+    out = dict(output)
+    out["X_gen"] = ak.Array(gen)
+    out["ygen_hit"] = ak.Array(np.zeros(len(y_hit), dtype=y_hit.dtype if len(y_hit) else np.int64))
+    out["ygen_track"] = ak.Array(np.full(n_trk, -1, dtype=y_hit.dtype if len(y_hit) else np.int64))
+    return out
+
+
 def create_inputs_from_table(
     output, prediction=False, args=None
 ):
+    if len(output["X_gen"]) == 0 and os.environ.get("PREDICT_NO_TRUTH", "") == "1":
+        output = _no_truth_placeholder(output)
     number_hits = np.int32(len(output["X_track"])+len(output["X_hit"]))
     number_part = np.int32(len(output["X_gen"]))
     if number_part == 0:
