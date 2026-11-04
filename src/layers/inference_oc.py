@@ -908,6 +908,8 @@ def generate_showers_data_frame(
 
 
     n_extra_features = 7 # n nodes, 1 highest betas
+    if not pandora and extra_features is not None and np.ndim(extra_features) == 2 and np.shape(extra_features)[1] > 0:
+        n_extra_features = np.shape(extra_features)[1]   # 8 with the stage-2 noise class (EC_NOISE_CLUSTERS)
     matched_extra_features = torch.zeros((energy_t.shape[0], n_extra_features)) * (torch.nan)
     #matched_extra_features = matched_extra_features.to(e_pred_showers.device)
     if pandora:

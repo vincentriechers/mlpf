@@ -3,6 +3,7 @@ from lightning.pytorch.callbacks import BaseFinetuning
 import os
 import torch
 from src.layers.postprocess_labels import postprocess_labels
+from src.layers.noise_clusters import NOISE_PID, noise_pseudo_clusters
 import torch.nn as nn
 import dgl
 from src.layers.inference_oc import (
@@ -314,6 +315,28 @@ def obtain_clustering_for_matched_showers(
                 graphs_showers_matched.append(g)
                 true_energy_showers.append(true_energy_shower.view(-1))
                 reco_energy_showers.append(reco_energy_shower.view(-1))
+        noise_link = float(os.environ.get("EC_NOISE_CLUSTERS", "0"))
+        if use_gt_clusters and noise_link > 0:
+            # noise-only clusters as pseudo-particles: true energy 0, PID NOISE_PID (no energy loss, PID class "noise")
+            for mask in noise_pseudo_clusters(graphs[i], labels, noise_link, float(os.environ.get("EC_NOISE_EMIN", "0"))):
+                g = dgl.graph(([], []))
+                g.add_nodes(int(mask.sum()))
+                g = g.to(model_output.device)
+                g.ndata["h"] = graphs[i].ndata["h"][mask]
+                if "pos_pxpypz" in graphs[i].ndata:
+                    g.ndata["pos_pxpypz"] = graphs[i].ndata["pos_pxpypz"][mask]
+                if "pos_pxpypz_at_vertex" in graphs[i].ndata:
+                    g.ndata["pos_pxpypz_at_vertex"] = graphs[i].ndata["pos_pxpypz_at_vertex"][mask]
+                g.ndata["chi_squared_tracks"] = graphs[i].ndata["chi_squared_tracks"][mask]
+                e_m = graphs[i].ndata["e_hits"].view(-1)[mask]
+                xyz = graphs[i].ndata["pos_hits_xyz"][mask]
+                c = (xyz * e_m[:, None]).sum(0) / e_m.sum().clamp(min=1e-9)
+                graphs_showers_matched.append(g)
+                true_energy_showers.append(torch.zeros(1, device=model_output.device))
+                reco_energy_showers.append(e_m.sum().view(-1))
+                energy_true_daughters.append(torch.zeros(1, device=model_output.device))
+                y_pids_matched.append(NOISE_PID)
+                y_coords_matched.append((c / c.norm().clamp(min=1e-9)).detach().cpu().numpy())
         pred_showers = shower_p_unique
         pred_showers[index_matches] = -1
         pred_showers[

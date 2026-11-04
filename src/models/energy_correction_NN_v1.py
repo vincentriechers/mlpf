@@ -381,6 +381,8 @@ class EnergyCorrection():
             if not self.args.restrict_PID_charge:
                 pids_neutral += [4]
         self.pids_charged = pids_charged
+        if float(os.environ.get("EC_NOISE_CLUSTERS", "0")) > 0:
+            pids_neutral = pids_neutral + [5]  # 5 = noise-only cluster (pseudo-particle PID 0, noise_clusters.NOISE_PID)
         self.pids_neutral = pids_neutral
 
     def get_energy_correction(self, main_model):
@@ -662,6 +664,12 @@ class EnergyCorrection():
             else:
                 neutral_PID_pred1 = []
             pred_pid[neutral_idx.flatten()] = torch.tensor(neutral_PID_pred1).long().to(neutral_idx.device)
+            if 5 in self.pids_neutral and len(neutral_idx) and not self.main_model.training:
+                # inference: a neutral cluster whose noise probability exceeds EC_NOISE_DROP is dropped (energy 0, photon)
+                p_noise = torch.softmax(neutral_PID_pred.detach().float(), dim=1)[:, self.pids_neutral.index(5)]
+                drop = neutral_idx.flatten()[(p_noise > float(os.environ.get("EC_NOISE_DROP", "0.5"))).to(neutral_idx.device)]
+                pred_energy_corr[drop] = 0.0
+                pred_pid[drop] = 3
         
 
         pred_energy_corr[pred_energy_corr < 0] = 0.0
@@ -795,7 +803,8 @@ class EnergyCorrection():
             charged_PID_pred, charged_PID_true_onehot, mask_charged = obtain_PID_charged(dic_e_cor,pid_true_matched, self.pids_charged, self.args, self.pid_conversion_dict)
 
         if len(self.pids_neutral):
-            neutral_PID_pred, neutral_PID_true_onehot, mask_neutral = obtain_PID_neutral(dic_e_cor,pid_true_matched, self.pids_neutral, self.args, self.pid_conversion_dict)
+            conv = {**self.pid_conversion_dict, 0: 5} if 5 in self.pids_neutral else self.pid_conversion_dict
+            neutral_PID_pred, neutral_PID_true_onehot, mask_neutral = obtain_PID_neutral(dic_e_cor,pid_true_matched, self.pids_neutral, self.args, conv)
 
         if len(self.pids_charged):
             loss_charged_pid,acc_charged, stats= pid_loss_weighted(charged_PID_pred, charged_PID_true_onehot,e_true[dic_e_cor["charged_idx"]], mask_charged, stats, fixed, "charged",
@@ -881,6 +890,8 @@ class EnergyCorrection():
                 if len(neutral_idx_cpu) and neutral_PID_pred_cpu.shape[1] >= 2:
                     PID_logits[neutral_idx_cpu,2] = neutral_PID_pred_cpu[: len(neutral_idx_cpu), 0]
                     PID_logits[neutral_idx_cpu,3] = neutral_PID_pred_cpu[: len(neutral_idx_cpu), 1]
+                if len(neutral_idx_cpu) and neutral_PID_pred_cpu.shape[1] >= 3:
+                    PID_logits[neutral_idx_cpu,5] = neutral_PID_pred_cpu[: len(neutral_idx_cpu), 2]
             else:
                 PID_logits = torch.zeros(len(e_cor), max_len).float()
                 PID_logits[charged_idx.cpu()] = charged_PID_pred_cpu
