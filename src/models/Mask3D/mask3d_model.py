@@ -36,7 +36,7 @@ from src.layers.inference_oc_mask3d import (
     labels_from_masks,
 )
 from src.layers.postprocess_labels import postprocess_labels
-from src.layers.inference_oc import remove_bad_tracks_from_cluster_v1
+from src.layers.inference_oc import remove_bad_tracks_from_cluster_v1, compact_labels_preserve_zero
 
 
 class CosineAnnealingThenFixedScheduler:
@@ -229,6 +229,16 @@ class ExampleWrapper(L.LightningModule):
         force_track_assignment=False,
         track_hit_type=1,
         track_mask_threshold=0.1,
+        #   track_pin             track-owned queries (src/layers/track_pin.py):
+        #                         at inference every tracker hit joins the query
+        #                         it seeded if that query is valid; in training
+        #                         the matching cost of (query, particle of its
+        #                         seed track) is lowered by track_pin_cost so
+        #                         the query is trained as that particle. Env
+        #                         M3D_TRACK_PIN=1 switches the inference part
+        #                         on for an existing checkpoint.
+        track_pin=False,
+        track_pin_cost=1000.0,
         # ---------------- Gaussian-mixture query bias ----------------
         # Each query owns K learnable Gaussians in 3-space (means, full
         # covariance via Cholesky, mixing weights). Their log-density at
@@ -532,6 +542,8 @@ class ExampleWrapper(L.LightningModule):
         self.track_hit_type = int(track_hit_type)
         self.force_track_assignment = bool(force_track_assignment)
         self.track_mask_threshold = float(track_mask_threshold)
+        self.track_pin = bool(track_pin) or os.environ.get("M3D_TRACK_PIN", "") == "1"
+        self.track_pin_cost = float(track_pin_cost)
         # Eval/--predict hit-assignment thresholds (sweepable via CLI for the
         # clustering-completeness vs Pandora test). Fall back to the static
         # defaults / the ctor track threshold so training is unaffected.
@@ -683,6 +695,7 @@ class ExampleWrapper(L.LightningModule):
             pos_padded=pos_padded,
             disable_mask_attention=disable_mask_attn,
         )
+        targets["seed_idx"] = getattr(self.decoder, "_last_seed_idx", None)
         return self._post_decoder(
             g, y, targets, per_layer, queries, attn_bias,
             return_train=return_train,
@@ -704,6 +717,7 @@ class ExampleWrapper(L.LightningModule):
             self._last_cls_logits = per_layer[-1]["cls_logits"]
             self._last_key_valid = targets["key_valid"]
             self._last_queries = queries
+            self._last_seed_idx = targets.get("seed_idx")
             x_oc = self.ec_adapter(
                 per_layer[-1]["mask_logits"], queries,
                 targets["batch_ids"], targets["local_idx"], targets["key_valid"],
@@ -738,6 +752,8 @@ class ExampleWrapper(L.LightningModule):
                         force_track_assignment=getattr(
                             self, "force_track_assignment", True,
                         ),
+                        seed_idx=(targets["seed_idx"][i] if targets.get("seed_idx") is not None else None),
+                        track_pin=self.track_pin,
                     )
                     if not _truth_tracks:
                         # Drop tracks whose momentum is inconsistent with the
@@ -756,8 +772,10 @@ class ExampleWrapper(L.LightningModule):
                         # Re-densify: remove_bad_tracks can empty a cluster and
                         # leave a label gap, which crashes match_showers
                         # downstream (sizes by len(unique) but indexes by
-                        # max+1).
-                        _, lab_i = torch.unique(lab_i, return_inverse=True)
+                        # max+1). Label 0 stays noise: a plain unique would
+                        # turn the first cluster into noise when every hit is
+                        # assigned.
+                        lab_i = compact_labels_preserve_zero(lab_i)
                     per_event.append(lab_i)
                 # Concatenate into a flat (total_hits,) tensor in graph node
                 # order — `obtain_clustering_for_matched_showers` slices it
@@ -799,6 +817,7 @@ class ExampleWrapper(L.LightningModule):
                 subsystem_offset=self.subsystem_offset,
                 track_loss_weight=self.track_loss_weight,
                 track_cost_weight=self.track_cost_weight,
+                track_pin_cost=(self.track_pin_cost if self.track_pin else 0.0),
                 track_hit_type=self.track_hit_type,
                 attn_bias=attn_bias,
                 gmm_coverage_weight=self.gmm_coverage_weight,
@@ -926,6 +945,8 @@ class ExampleWrapper(L.LightningModule):
                 track_hit_type=self.track_hit_type,
                 queries=getattr(self, "_last_queries", None),
                 gmm_module=self.decoder.gmm if self.use_gmm_query else None,
+                seed_idx=getattr(self, "_last_seed_idx", None),
+                track_pin=self.track_pin,
             )
             self.df_showers_pandora.append(df_batch_pandora)
             self.df_showes_db.append(df_batch1)
@@ -946,6 +967,7 @@ class ExampleWrapper(L.LightningModule):
                 subsystem_offset=self.subsystem_offset,
                 track_loss_weight=self.track_loss_weight,
                 track_cost_weight=self.track_cost_weight,
+                track_pin_cost=(self.track_pin_cost if self.track_pin else 0.0),
                 track_hit_type=self.track_hit_type,
                 attn_bias=attn_bias,
                 gmm_coverage_weight=self.gmm_coverage_weight,
@@ -1074,6 +1096,8 @@ class ExampleWrapper(L.LightningModule):
                 track_hit_type=self.track_hit_type,
                 queries=queries,
                 gmm_module=self.decoder.gmm if self.use_gmm_query else None,
+                seed_idx=targets.get("seed_idx"),
+                track_pin=self.track_pin,
             )
             self.df_showers_pandora.append(df_batch_pandora)
             self.df_showes_db.append(df_batch1)

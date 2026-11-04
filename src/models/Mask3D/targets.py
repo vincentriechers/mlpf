@@ -90,6 +90,10 @@ def build_targets(g, y, ILD=False, pos_scale=0.001):
 
     # ---------------- padded GT mask ----------------
     particle_number = g.ndata["particle_number"].long().view(-1)
+    # GT particle slot of every key (particle_number - 1), -1 for noise and padding;
+    # lets the loss pin a track-seeded query to its particle (src/layers/track_pin.py).
+    key_slot = torch.full((B, N_h_max), -1, dtype=torch.long, device=device)
+    key_slot[batch_ids, local_idx] = particle_number - 1
     p_counts = []
     for i in range(B):
         m = batch_ids == i
@@ -233,6 +237,7 @@ def build_targets(g, y, ILD=False, pos_scale=0.001):
         "key_valid": key_valid,
         "hit_subsystem": hit_subsystem,
         "hit_e": hit_e,
+        "key_slot": key_slot,
         # Flat (total_hits,) integer hit_type — used by PerSubsystemInputNet
         # to route each hit to its detector-specific input net.
         "hit_type_flat": hit_type,

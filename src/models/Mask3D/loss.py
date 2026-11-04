@@ -16,6 +16,7 @@ Mirrors `hepattn.models.maskformer.MaskFormer.loss`:
 """
 import torch
 import torch.nn.functional as F
+from src.layers.track_pin import track_pin_matrix
 
 
 # ---------------- pairwise costs (B, N_q, N_p) ----------------
@@ -369,6 +370,10 @@ def mask3d_loss(
     # spans obj_bce_cost_weight = 1.0, so a weight of ~1.0 is what it takes
     # for a track mismatch to outrank a whole shower's worth of dice.
     track_cost_weight=0.0,
+    # Track-owned queries: subtract this from the matching cost of (query, the
+    # particle of the tracker hit that seeded it) so the assignment is pinned.
+    # 0.0 = off. Needs targets['seed_idx'] (decoder) and ['key_slot'] (build_targets).
+    track_pin_cost=0.0,
     track_hit_type=1,
     attn_bias=None,
     gmm_coverage_weight=0.0,
@@ -588,6 +593,16 @@ def mask3d_loss(
         outs["cls_logits"] = outs["cls_logits"].clamp(-_LOGIT_CLAMP, _LOGIT_CLAMP)
 
     with torch.no_grad():
+        pin = None
+        if track_pin_cost and targets.get("seed_idx") is not None and "key_slot" in targets and hit_sub_all is not None:
+            pin = track_pin_matrix(targets["seed_idx"], key_valid, hit_sub_all, targets["key_slot"],
+                                   gt_valid, track_hit_type)                     # (B, N_q, N_p)
+            if not getattr(mask3d_loss, "_pin_announced", False):
+                n_pin = int(pin.any(dim=1).sum()); n_gt = int(gt_valid.sum())
+                n_trk = int(((hit_sub_all == track_hit_type) & key_valid).sum())
+                print(f"[mask3d_loss] track pin on (cost {float(track_pin_cost):g}): first batch pins "
+                      f"{n_pin} of {n_gt} GT particles from {n_trk} tracker hits", flush=True)
+                mask3d_loss._pin_announced = True
         layer_costs = []
         for li in layers_for_loss:
             outs = per_layer_outs[li]
@@ -616,6 +631,8 @@ def mask3d_loss(
                 cost = cost + track_cost_weight * _track_pairwise(
                     outs["mask_logits"], gt_mask, key_valid, is_track_all
                 )
+            if pin is not None:
+                cost = cost - float(track_pin_cost) * pin.to(cost.dtype)
             # Padded GT slots are excluded by the matcher via object_valid_mask
             # (truncates rows to the first n_real), so no cost inflation needed
             # — same as hepattn.

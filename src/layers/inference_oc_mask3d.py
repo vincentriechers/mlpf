@@ -27,6 +27,7 @@ from src.layers.inference_oc import (
     get_labels_pandora,
     _fix_labels_for_classes,
     remove_bad_tracks_from_cluster_v1,
+    compact_labels_preserve_zero,
 )
 
 
@@ -39,6 +40,8 @@ def labels_from_masks(
     track_mask_threshold=None,
     track_hit_type=1,
     force_track_assignment=False,
+    seed_idx=None,
+    track_pin=False,
 ):
     """Convert per-(query, hit) mask logits into per-hit cluster labels.
 
@@ -99,6 +102,11 @@ def labels_from_masks(
     if force_track_assignment and hit_type is not None:
         is_track = hit_type.view(-1) == track_hit_type
         is_assigned = is_assigned | (is_track & valid_q[argmax_q])
+    if track_pin and seed_idx is not None and hit_type is not None:
+        # Track-owned queries: a tracker hit joins the query it seeded when that
+        # query is valid (src/layers/track_pin.py); otherwise the rule above stands.
+        from src.layers.track_pin import pin_tracks_to_seed_queries
+        pin_tracks_to_seed_queries(argmax_q, is_assigned, valid_q, seed_idx, hit_type.view(-1), track_hit_type)
     raw = torch.where(is_assigned, argmax_q + 1, torch.zeros_like(argmax_q))
 
     # Compress to dense ids: 0 stays at 0; used queries → 1..K.
@@ -145,6 +153,8 @@ def create_and_store_graph_output_mask3d(
     track_hit_type=1,
     queries=None,
     gmm_module=None,
+    seed_idx=None,           # (B, N_q) key that seeded each query, -1 if none (track pin)
+    track_pin=False,
 ):
     """Mask3D-flavoured `create_and_store_graph_output`.
 
@@ -218,6 +228,8 @@ def create_and_store_graph_output_mask3d(
                 track_mask_threshold=track_mask_threshold,
                 track_hit_type=track_hit_type,
                 force_track_assignment=force_track_assignment,
+                seed_idx=(seed_idx[i] if seed_idx is not None else None),
+                track_pin=track_pin,
             )
             if not truth_tracks:
                 # MUST mirror the EC-side cleaning in mask3d_model._post_decoder
@@ -244,7 +256,7 @@ def create_and_store_graph_output_mask3d(
                     _u = torch.unique(labels)
                     print("[m3d-df] labels post-clean: n_clusters=%d has0=%s n_hits0=%d"
                           % (len(_u), bool((_u == 0).any()), int((labels == 0).sum())))
-                _, labels = torch.unique(labels, return_inverse=True)
+                labels = compact_labels_preserve_zero(labels)      # keeps 0 = noise when every hit is assigned
 
         # Oracle override for selected classes (kept for parity with OC path)
         if fix_clusters_class:
@@ -252,7 +264,7 @@ def create_and_store_graph_output_mask3d(
                 labels, dic["graph"], dic["part_true"],
                 fix_clusters_class, ev_mask_logits.device,
             )
-            _, labels = torch.unique(labels, return_inverse=True)
+            labels = compact_labels_preserve_zero(labels)
 
         if predict and pandora_available:
             labels_pandora = get_labels_pandora(tracks, dic, ev_mask_logits.device)

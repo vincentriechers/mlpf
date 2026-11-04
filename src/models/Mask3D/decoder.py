@@ -466,6 +466,10 @@ class MaskFormerDecoder(nn.Module):
             pad = self.num_queries - k
             seed = F.pad(seed, (0, 0, 0, pad))                    # (B, N_q, D)
             seed_idx = F.pad(seed_idx, (0, pad))                  # diagnostic only
+        # Which key seeded each query, -1 where none: read by the loss (matching
+        # pin) and by labels_from_masks (track pin) when `track_pin` is on.
+        seed_valid_full = F.pad(seed_valid, (0, self.num_queries - k), value=False) if k < self.num_queries else seed_valid
+        self._last_seed_idx = torch.where(seed_valid_full, seed_idx, torch.full_like(seed_idx, -1))
         q = seed + self.query_bias.unsqueeze(0)                   # (B, N_q, D)
         return q, seed_idx
 
@@ -490,6 +494,7 @@ class MaskFormerDecoder(nn.Module):
         else:
             q = self.initial_queries.unsqueeze(0).expand(B, -1, -1).contiguous()
             seed_idx = None
+            self._last_seed_idx = None
 
         # v5 anchor path — per-query center for `QueryAnchorHead`. With
         # encoder-seeded queries we use the position of the seeded encoder
