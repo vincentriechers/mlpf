@@ -13,7 +13,7 @@ comparison axis.
 DELANA has no per-particle dataframe in this pipeline, so it appears in none of these.
 The event-level DELANA comparison lives in
 `delphi_converter/analysis/fair_visible_energy.py` and its figures in
-`delphi_converter/analysis/raw_hits/plot_model_vs_delana.py`.
+`delphi_converter/analysis/simulation/plot_model_vs_delana.py`.
 
 Colours follow the study's house style (`delphi_converter/analysis/chef2026/chef_style.py`):
 HitPF teal, Mask3D amethyst, so these figures read as siblings of the event-level ones.
@@ -50,6 +50,8 @@ GE, GP = 8, slice(12, 15)          # X_gen energy, momentum
 LST, LPDG, LP, LE = 1, 2, slice(3, 6), 6   # X_lu status, PDG, momentum, energy
 NEUTRINOS = (12, 14, 16)
 PE, PP, PLOCK = 4, slice(1, 4), 11  # X_pa energy, momentum, lock
+TP, TPV = 5, slice(6, 9)           # X_track |p|, momentum vector
+BEAM_E = 45.6                      # tracks above the beam energy are mis-measured and not counted
 
 
 def delana_event_quantities(val_dir, skip_files=0, n_files=None):
@@ -63,10 +65,10 @@ def delana_event_quantities(val_dir, skip_files=0, n_files=None):
     """
     files = sorted(glob.glob(os.path.join(val_dir, "pf_tree_*.parquet")))[skip_files:]
     files = files[:n_files] if n_files else files
-    dE, dM, tE, tM, gE, gM = [], [], [], [], [], []
+    dE, dM, tE, tM, gE, gM, xE, xM = [], [], [], [], [], [], [], []
     for f in files:
         row = pq.read_table(f, columns=["X_gen", "ygen_hit", "ygen_track", "X_pa",
-                                        "X_lu"]).to_pylist()[0]
+                                        "X_lu", "X_track"]).to_pylist()[0]
         for i in range(len(row["X_gen"])):
             xg = np.asarray(row["X_gen"][i], dtype=float).reshape(-1, 21)
             seen = {int(k) for k in np.asarray(row["ygen_hit"][i], dtype=np.int64) if k >= 0}
@@ -76,6 +78,17 @@ def delana_event_quantities(val_dir, skip_files=0, n_files=None):
             e = float(xg[idx, GE].sum()) if len(idx) else 0.0
             p = xg[idx, GP].sum(axis=0) if len(idx) else np.zeros(3)
             tE.append(e); tM.append(float(np.sqrt(max(e * e - p @ p, 0.0))))
+            # targets plus every track without a target below the beam energy, counted massless
+            # as the models count them: what a reconstruction of the targets plus those tracks gives
+            xt = (np.asarray(row["X_track"][i], dtype=float).reshape(-1, 27)
+                  if row["X_track"][i] else np.zeros((0, 27)))
+            yt = np.asarray(row["ygen_track"][i], dtype=np.int64)
+            if len(xt) and len(yt) == len(xt):
+                free = (yt < 0) & (xt[:, TP] < BEAM_E)
+                e2, p2 = e + float(xt[free, TP].sum()), p + xt[free, TPV].sum(axis=0)
+            else:
+                e2, p2 = e, p
+            xE.append(e2); xM.append(float(np.sqrt(max(e2 * e2 - p2 @ p2, 0.0))))
             pa = (np.asarray(row["X_pa"][i], dtype=float).reshape(-1, 18)
                   if row["X_pa"][i] else np.zeros((0, 18)))
             un = pa[pa[:, PLOCK] == 0] if len(pa) else pa
@@ -91,20 +104,23 @@ def delana_event_quantities(val_dir, skip_files=0, n_files=None):
             gE.append(e); gM.append(float(np.sqrt(max(e * e - p @ p, 0.0))))
     return {k: np.asarray(v) for k, v in
             (("delana_E", dE), ("delana_M", dM), ("target_E", tE), ("target_M", tM),
-             ("gen_E", gE), ("gen_M", gM))}
+             ("gen_E", gE), ("gen_M", gM), ("target_trk_E", xE), ("target_trk_M", xM))}
 
 
 def plot_visible_scale_comparison(model_dics, delana, output_path):
     """Absolute visible energy and visible mass per event, in GeV: the truth, DELANA and
     every model on one pair of axes. The Z peak is directly visible."""
     fig, axes = plt.subplots(1, 2, figsize=fe.EVENT_FIGSIZE, gridspec_kw=fe.EVENT_GRID_KW)
-    panels = [("E_true", "E_pred", "gen_E", "delana_E", "Visible energy [GeV]"),
-              ("mass_true", "mass_pred_p", "gen_M", "delana_M", "Visible mass [GeV]")]
-    for ax, (tk, pk, gk, dk, xlabel) in zip(axes, panels):
+    panels = [("E_true", "E_pred", "gen_E", "delana_E", "target_trk_E", "Visible energy [GeV]"),
+              ("mass_true", "mass_pred_p", "gen_M", "delana_M", "target_trk_M", "Visible mass [GeV]")]
+    for ax, (tk, pk, gk, dk, xk, xlabel) in zip(axes, panels):
         truth = np.asarray(next(iter(model_dics.values()))[tk], dtype=float)
         # the grey curve is the TRAINING TARGETS, which exclude particles that never reach a
         # calorimeter; the generator curve is what a complete reconstruction should reproduce
-        series = [("Training targets", truth, {"color": "#808080", "linestyle": "-"})]
+        series = [("Targets (calorimeter only)", truth, {"color": "#808080", "linestyle": "-"})]
+        if delana is not None and xk in delana:
+            series.append(("Targets + tracks w/o target", np.asarray(delana[xk], dtype=float),
+                           {"color": "#808080", "linestyle": ":"}))
         if delana is not None:
             series.append(("DELANA", delana[dk], DELANA_STYLE))
         for name, dic in model_dics.items():
@@ -132,7 +148,8 @@ def plot_visible_scale_comparison(model_dics, delana, output_path):
         ax.set_ylabel("Normalized entries")
         ax.set_xlim(bins[0], bins[-1])
         ax.grid(True, alpha=0.25, linestyle="--")
-        ax.legend(fontsize=14, title="median +- q68 [GeV]", title_fontsize=13)
+        ax.set_ylim(0, ax.get_ylim()[1] * 1.55)
+        ax.legend(fontsize=12, title="median +- q68 [GeV]", title_fontsize=12, loc="upper left")
     fe.save_fixed_canvas(fig, output_path)
 
 
@@ -149,8 +166,9 @@ def plot_event_comparison_models(frames, output_path, component_label=None,
     if not subs:
         return
     fig, axes = plt.subplots(1, 2, figsize=fe.EVENT_FIGSIZE, gridspec_kw=fe.EVENT_GRID_KW)
-    panels = ((0, r"$E_{\mathrm{reco}} / E_{\mathrm{true}}$"),
-              (1, r"$M_{\mathrm{reco}} / M_{\mathrm{true}}$"))
+    # the denominator is the TRAINING TARGETS (calorimeter-visible particles), not the generator
+    panels = ((0, r"$E_{\mathrm{reco}} / E_{\mathrm{targets}}$"),
+              (1, r"$M_{\mathrm{reco}} / M_{\mathrm{targets}}$"))
     for ax, (j, xlabel) in zip(axes, panels):
         pooled = [np.asarray(v[j], dtype=float) for v in subs.values()]
         if extra is not None:
@@ -201,6 +219,10 @@ def enable_ratio_panels(order):
     original = fe.style_ratio_axis
     fe.style_ratio_axis = (lambda ax, particle, ylabel, values, metric_key=None, _o=original, _l=pair:
                            _o(ax, particle, _l, values, metric_key=metric_key))
+    # the resolution figure hard-codes the CLD pair label ("o3_v01 / o2_v05") in fe; relabel it too
+    original_res = fe.style_resolution_ratio_axis
+    fe.style_resolution_ratio_axis = (lambda ax, particle, ylabel, values, _o=original_res, _l=pair:
+                                      _o(ax, particle, _l, values))
     # the ratio figures read the module-level particle lists, which still carry the CLD energy ranges
     fe.PARTICLES = fed.DELPHI_PARTICLES
     fe.RESOLUTION_PARTICLES = fed.DELPHI_RESOLUTION_PARTICLES
@@ -219,6 +241,11 @@ def parse_args():
     p.add_argument("--skip-files", type=int, default=0,
                    help="with --delana: the parquet slice the models were evaluated on")
     p.add_argument("--n-files", type=int, default=None)
+    p.add_argument("--track-only", choices=("keep", "separate"), default="keep",
+                   help="track-only particles (a track, no calorimeter cell): 'keep' leaves the frames as "
+                        "evaluated; 'separate' labels them charged hadrons and leaves those without a target "
+                        "out of the per-particle figures (they have no target by construction, so they are "
+                        "not fakes). Event-level figures always use every particle.")
     p.add_argument("--skip-target-info", action="store_true",
                    help="skip the parquet join; drops only the n_hits diagnostic")
     return p.parse_args()
@@ -242,17 +269,29 @@ def main():
     summary_dir = os.path.join(args.output_dir, "summary_plots")
     os.makedirs(summary_dir, exist_ok=True)
 
-    frames, eff_curves, res_curves, summary_rows = {}, {}, {}, []
+    frames, frames_pp, eff_curves, res_curves, summary_rows = {}, {}, {}, {}, []
+    fake_note = " (clusters with cells)" if args.track_only == "separate" else ""
     for name, pattern in specs:
         fed.DELPHI_LABEL = name                       # the single-dataset figures read this
         frame = fe.validate_hitpf_frame(
             fe.prepare_mlpf_frame(fe.load_eval_dataframe(pattern)), name)
         if not args.skip_target_info:
             frame = fed.attach_target_info(frame, args.val_dir)
-        frames[name] = frame
-        eff_curves[name] = fe.compute_particle_curves(frame, False)
-        res_curves[name] = fe.compute_resolution_curves(frame, False)
-        summary_rows.extend(fe.summarize_run(name, frame, False))
+        per_particle = frame
+        if args.track_only == "separate":
+            lone = (frame["calibrated_E"].notna() & (frame["is_track_in_cluster"] > 0)
+                    & (frame["ECAL_hits"].fillna(0) + frame["HCAL_hits"].fillna(0) == 0))
+            frame.loc[lone, "pred_pid_matched"] = 1          # charged hadron (4-class scheme)
+            per_particle = frame[~(lone & frame["pid"].isna())].copy()
+            n_ev = frame["number_batch"].nunique()
+            print(f"[{name}] track-only particles: {int(lone.sum())} ({lone.sum() / n_ev:.2f}/event, "
+                  f"{float(frame.loc[lone, 'calibrated_E'].sum()) / n_ev:.2f} GeV/event), labelled charged hadron; "
+                  f"{int((lone & frame['pid'].isna()).sum())} without a target left out of the per-particle figures")
+        frames[name] = frame                                 # event level: every particle
+        frames_pp[name] = per_particle                       # per particle
+        eff_curves[name] = fe.compute_particle_curves(per_particle, False)
+        res_curves[name] = fe.compute_resolution_curves(per_particle, False)
+        summary_rows.extend(fe.summarize_run(name, per_particle, False))
         print(f"[{name}] {len(frame)} rows")
 
     delana = None
@@ -266,7 +305,7 @@ def main():
     for metric, err, ylabel, fname, logy in [
             ("eff", "errors", "Clustering efficiency", "overview_Efficiency_clustering.pdf", False),
             ("eff_pid", "errors_pid", "Efficiency with PID", "overview_Efficiency_pid.pdf", False),
-            ("fake_rate", "fake_rate_err", "Fake rate", "overview_FakeRate.pdf", True),
+            ("fake_rate", "fake_rate_err", "Fake rate" + fake_note, "overview_FakeRate.pdf", True),
             ("fake_energy_fraction", "fake_energy_fraction_err", r"Fake energy [$\%$]",
              "overview_FakeEnergy.pdf", True)]:
         fed.plot_metric_grid_delphi(eff_curves, metric, err, ylabel,
@@ -283,7 +322,7 @@ def main():
                  "overview_Efficiency_clustering_with_ratio.pdf", False),
                 ("eff_pid", "errors_pid", "Efficiency with PID",
                  "overview_Efficiency_pid_with_ratio.pdf", False),
-                ("fake_rate", "fake_rate_err", "Fake rate",
+                ("fake_rate", "fake_rate_err", "Fake rate" + fake_note,
                  "overview_FakeRate_with_ratio.pdf", True),
                 ("fake_energy_fraction", "fake_energy_fraction_err", r"Fake energy [$\%$]",
                  "overview_FakeEnergy_with_ratio.pdf", True)]:
@@ -333,9 +372,9 @@ def main():
         d = os.path.join(summary_dir, name)
         os.makedirs(d, exist_ok=True)
         fed.plot_confusion_matrix_delphi(
-            frame, os.path.join(d, "pid_confusion_matrix_per_energy.pdf"))
+            frames_pp[name], os.path.join(d, "pid_confusion_matrix_per_energy.pdf"))
         if not args.skip_target_info:
-            fed.plot_nhits_diagnostic(frame, os.path.join(d, "nhits_efficiency_response.pdf"))
+            fed.plot_nhits_diagnostic(frames_pp[name], os.path.join(d, "nhits_efficiency_response.pdf"))
         fed.plot_visible_mass_delphi(frame, os.path.join(d, "visible_mass.pdf"))
         fed.plot_event_comparison_delphi(
             frame, os.path.join(d, "event_energy_mass_comparison.pdf"),
