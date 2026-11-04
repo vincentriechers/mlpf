@@ -1,6 +1,10 @@
 # MLPF FCC
 Machine learning based pipeline for particle flow at FCC. 
 
+> **DELPHI (branch `delphi-mask3d`).** This branch adds training and evaluation on the DELPHI detector at LEP: HitPF and
+> Mask3D clustering, a shared energy-correction/PID stage with a noise class, and BSC (MareNostrum 5) job scripts.
+> Start at [`scripts/bsc/README.md`](scripts/bsc/README.md).
+
 Latest documentation/ presentations can be found here:
 - [HitPF Note](https://repository.cern/records/n9wc2-09n03)
 - [Talk at FCC workshop](https://indico.cern.ch/event/1588696/contributions/6857314/attachments/3209610/5716524/MachineLearning_Physics_Workshop_29_01.pptx-1.pdf)

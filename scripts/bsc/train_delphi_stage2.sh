@@ -65,12 +65,12 @@ NUM_EPOCHS=${NUM_EPOCHS:-2}
 TRAIN_BATCHES=${TRAIN_BATCHES:-2000}
 PID_WEIGHTING=${PID_WEIGHTING:-none}
 SOFT_MUON_CUT=${SOFT_MUON_CUT:-0.0}
-# Which model gets the EC/PID heads. Default = HitPF (GATr). For Mask3D pass
+# Which model shell holds the EC/PID heads. Default = HitPF (GATr). For Mask3D pass
 #   NETWORK_CONFIG=src/models/wrapper/example_mode_mask3d.py \
 #   NETWORK_OPTS="-o use_ipa_decoder False -o num_queries 320 -o window_size None"
-# The comparison needs ONE EC PER MODEL: the heads sit inside the model and are
-# trained on its own backbone features, then grafted onto its clustering at full
-# evaluation. A HitPF EC is not reusable for Mask3D.
+# The heads read only the cluster's cells and tracks, not the backbone, so the
+# current recipe trains ONE stage 2 in the default shell and grafts it onto both
+# models at evaluation (check the head-key count on the load line).
 NETWORK_CONFIG=${NETWORK_CONFIG:-src/models/wrapper/example_mode_gatr_noise.py}
 NETWORK_OPTS=${NETWORK_OPTS:-}
 # HitPF/GATr IGNORES --optimizer entirely — Gatr_pf_e_noise.configure_optimizers
