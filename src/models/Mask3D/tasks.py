@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.layers import embedding_dump
+
 
 class _MLP(nn.Module):
     def __init__(self, dim, out_dim=None, hidden=None):
@@ -90,7 +92,10 @@ class ObjectHitMaskTask(nn.Module):
             o = F.normalize(o, dim=-1)
             x = F.normalize(x, dim=-1)
             scale = self.log_scale.clamp(max=self.max_log_scale).exp()
+            embedding_dump.stash("mask_head", (x, o))
             return scale * torch.einsum("bnc,bmc->bnm", o, x)
+        if embedding_dump.enabled():
+            embedding_dump.stash("mask_head", (F.normalize(x, dim=-1), F.normalize(o, dim=-1)))
         return self.scale * torch.einsum("bnc,bmc->bnm", o, x)
 
     def forward(self, q, k, hit_subsystem=None):

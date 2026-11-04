@@ -24,6 +24,7 @@ except ModuleNotFoundError:
     dc = None  # Mask3D path doesn't need it; functions that use dc will
                # NameError at call time if invoked without the package.
 from src.utils.pid_conversion import pid_conversion_dict as _PID_CONV_DICT
+from src.layers import embedding_dump
 # from src.layers.dpc_track_seeded import DPC_track_seeded  # module absent; only use is commented out below
 
 def compact_labels_preserve_zero(labels):
@@ -547,6 +548,7 @@ def create_and_store_graph_output(
             )
 
         dic["graph"].ndata["labels"]=labels_hdb
+        embedding_dump.add_event(dic["graph"], labels_hdb, coords=X, beta=dic["graph"].ndata["beta"])
         # --- debug dump of per-event graph + clustering (gated by env var DUMP_GRAPHS=<N>) ---
         _dump_max = int(os.environ.get("DUMP_GRAPHS", "0"))
         if _dump_max > 0:

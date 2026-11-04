@@ -19,6 +19,7 @@ import dgl
 import pandas as pd
 
 from src.layers.postprocess_labels import postprocess_labels
+from src.layers import embedding_dump
 from src.layers.inference_oc import (
     match_showers,
     generate_showers_data_frame,
@@ -278,6 +279,7 @@ def create_and_store_graph_output_mask3d(
             local_rank, i, path_save, tracks=tracks, hdbscan=True,
         )
         dic["graph"].ndata["labels"] = labels
+        embedding_dump.add_mask3d_event(dic["graph"], labels, ev_mask_logits, ev_cls_logits, i, n_i, cls_threshold)
 
         # Stash per-event Mask3D outputs (queries, mask/cls logits, GMM
         # params) AND a plain-tensor copy of the hit data needed to plot
