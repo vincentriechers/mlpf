@@ -121,7 +121,8 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
       --train-val-split 0.98 \
       --beta-noise-weight "${BETA_NOISE_WEIGHT:-1.0}" \
       --beta-noise-weight-track "${BETA_NOISE_WEIGHT_TRACK:-0.05}" \
-      --train-batches "${TRAIN_BATCHES:-100}"
+      --train-batches "${TRAIN_BATCHES:-100}" \
+      ${EXTRA_ARGS:-}
 
 RC=$?
 # Capture BEFORE the echo, and exit with it. Without the explicit

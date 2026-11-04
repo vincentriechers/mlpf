@@ -672,6 +672,18 @@ parser.add_argument(
 )
 
 parser.add_argument(
+    "--no-track-noise-rule",
+    default=False,
+    action="store_true",
+    help=(
+        "Training only. Skip functions_graph.make_bad_tracks_noise_tracks, the CLD rule that relabels a "
+        "track as noise when its calorimeter entry point is far from its particle's ECAL hits. On the DELPHI "
+        "read-out input it relabels 45 %% of labelled tracks (HPC is thick and coarse, hadrons shower in the "
+        "HAC), while evaluation never applies it, so training and evaluation truth disagree. Default: rule on."
+    ),
+)
+
+parser.add_argument(
     "--use-gt-clusters",
     default=False,
     action="store_true",

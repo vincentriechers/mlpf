@@ -40,6 +40,13 @@ class Hits:
     chi_squared_tracks: Any
     hit_type_one_hot: Any
     time_v:Any
+    # |D0| per node (0 for calo hits): the transverse impact parameter, used to tell a
+    # track from the primary vertex apart from a decay or interaction product. Optional
+    # so nothing that builds Hits without it has to change.
+    d0_tracks: Any = None
+    # |Z0| per node (0 for calo hits). DELANA cuts |z_P - z_V|; the primary vertex sits within
+    # about a centimetre of z = 0, so |Z0| stands in for it at a 10 cm threshold.
+    z0_tracks: Any = None
     # index: Any
     # collectionID: Any
     # hit_particle_link_calomother: Any
@@ -83,11 +90,13 @@ class Hits:
         # DELPHI files store positions in cm; the rest of the pipeline assumes mm
         # (e.g. calculate_distance_to_boundary / make_bad_tracks_noise_tracks constants)
         delphi = getattr(args, "delphi", False)
-        X_hit = _ak_to_tensor(output["X_hit"])
+        # .clone(): _ak_to_tensor shares memory with the loaded table, so an in-place cm->mm scaling would
+        # rescale the table itself and a second conversion of the same event would be 10x off.
+        X_hit = _ak_to_tensor(output["X_hit"]).clone()
         if delphi:
             X_hit[:, 6:9] = X_hit[:, 6:9] * 10.0
         if len(output["X_track"])>0:
-            X_track = _ak_to_tensor(output["X_track"])
+            X_track = _ak_to_tensor(output["X_track"]).clone()
             if delphi:
                 X_track[:, 12:15] = X_track[:, 12:15] * 10.0  # referencePoint_calo
         # obtain hit type
@@ -162,8 +171,16 @@ class Hits:
                 torch.zeros_like(_ndf),
             )
             chi_squared_tracks = torch.cat((p_hits, chi_tracks), dim=0)
+            # X_track[:, 18] = D0 (cm). Calo hits get 0, as they do for chi2/ndf.
+            d0_tracks = torch.cat(
+                (torch.zeros_like(p_hits), torch.nan_to_num(X_track[:, 18]).abs()), dim=0)
+            # X_track[:, 20] = Z0 (cm).
+            z0_tracks = torch.cat(
+                (torch.zeros_like(p_hits), torch.nan_to_num(X_track[:, 20]).abs()), dim=0)
         else:
             chi_squared_tracks = p_hits
+            d0_tracks = torch.zeros_like(p_hits)
+            z0_tracks = torch.zeros_like(p_hits)
         
         if args.ILD or args.allegro:
             hit_type_one_hot = torch.nn.functional.one_hot(
@@ -183,6 +200,8 @@ class Hits:
             pandora_features= pandora_features, 
             hit_type_feature=hit_type_feature,
             chi_squared_tracks=chi_squared_tracks,
+            d0_tracks=d0_tracks,
+            z0_tracks=z0_tracks,
             hit_type_one_hot = hit_type_one_hot, 
             time_v = time_v, 
             # collectionID = collectionID_ht, 

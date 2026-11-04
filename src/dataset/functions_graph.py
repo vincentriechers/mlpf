@@ -296,6 +296,10 @@ def create_graph(
         # g.ndata["index"] = hits.index.float() 
         # g.ndata["collectionID"] = hits.collectionID.float()  
         g.ndata["chi_squared_tracks"] = hits.chi_squared_tracks.float()
+        if hits.d0_tracks is not None:
+            g.ndata["d0_tracks"] = hits.d0_tracks.float()
+        if hits.z0_tracks is not None:
+            g.ndata["z0_tracks"] = hits.z0_tracks.float()
         g.ndata["particle_number"] = hits.hit_particle_link.float()+1 #(noise idx is 0 and particle MC 0 starts at 1)
         # g.ndata["particle_number_calomother"] = hits.hit_particle_link_calomother.float()+1 #(noise idx is 0 and particle MC 0 starts at 1)
         if args.ILD:
@@ -344,7 +348,7 @@ def create_graph(
             uot_ref[charged] = track_ref_xyz[uot_lbl[charged] - 1]
             g.ndata["uot_ref_xyz"] = uot_ref
     
-    if ( not args.truth_tracking) and (not args.predict):
+    if (not args.truth_tracking) and (not args.predict) and not getattr(args, "no_track_noise_rule", False):
         g = make_bad_tracks_noise_tracks(g, y_data_graph)
     if args.truth_tracking and (not args.predict):
         g = remove_hits_outside_cone(g,y_data_graph, args.allegro)
