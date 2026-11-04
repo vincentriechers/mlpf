@@ -1,8 +1,8 @@
 #!/bin/bash
 # =============================================================================
 # DELPHI STAGE 2 — energy correction + PID — BSC MareNostrum 5.
-# Port of scripts/scripts_vincent/train_properties_delphi.sh (Baobab,
-# apptainer) with the same physics flags.
+# Port of the earlier Baobab stage-2 recipe (train_properties_delphi.sh,
+# removed; see git history) with the same physics flags.
 #
 # >>> STAGE 2 DOES NOT DEPEND ON STAGE 1. <<< It trains the EC/PID heads on
 # ground-truth clusters (--use-gt-clusters) with the clustering backbone frozen
