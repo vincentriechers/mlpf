@@ -13,6 +13,9 @@
 #   sbatch scripts/bsc/train_delphi_stage2.sh
 #   PID_WEIGHTING_NEUTRAL=sqrt_inv sbatch ...        # neutral head only
 #   PID_WEIGHTING=sqrt_inv SOFT_MUON_CUT=1.5 sbatch ...   # everything at once
+#   EC_FAKES_AS_NOISE=1 sbatch ...   # on the frozen model's own clusters (no --use-gt-clusters):
+#       --load-model-weights must then hold the stage-1 clustering too; unmatched trackless
+#       clusters train the noise class (src/layers/noise_clusters.py)
 #
 # TWO FLAGS ARE NOT WHAT THEY LOOK LIKE: --add-track-chis is REQUIRED (asserted
 # at energy_correction_NN_v1.py:358), and --balance-pid-classes is a NO-OP on
@@ -87,6 +90,8 @@ echo "[stage2] host=$(hostname) gpus=$GPUS_PER_NODE list=$GPU_LIST"
 echo "[stage2] network-config=$NETWORK_CONFIG optimizer=$OPTIMIZER opts='$NETWORK_OPTS'"
 echo "[stage2] batch=$BATCH_SIZE x $GPUS_PER_NODE = $EFF_BATCH   start_lr=$START_LR"
 echo "[stage2] EC_NEUTRAL_INDIST=${EC_NEUTRAL_INDIST:-0.6 (default)} seed=${SEED:-none}"
+echo "[stage2] EC_FAKES_AS_NOISE=${EC_FAKES_AS_NOISE:-0} (1 = own clusters, else --use-gt-clusters)"
+echo "[stage2] EC_SHARE_TARGETS=${EC_SHARE_TARGETS:-0} (1 = energy-share targets for trackless clusters; needs EC_FAKES_AS_NOISE=1)"
 echo "[stage2] pid_class_weighting=$PID_WEIGHTING charged=${PID_WEIGHTING_CHARGED:-<global>} neutral=${PID_WEIGHTING_NEUTRAL:-<global>}  soft_muon_cut=$SOFT_MUON_CUT"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
 
@@ -154,7 +159,7 @@ srun --ntasks="$SLURM_NNODES" --ntasks-per-node=1 \
       ${PID_WEIGHTING_NEUTRAL:+--pid-class-weighting-neutral "$PID_WEIGHTING_NEUTRAL"} \
       --pid-soft-muon-cut "$SOFT_MUON_CUT" \
       --train-batches "$TRAIN_BATCHES" \
-      --use-gt-clusters \
+      $( [[ "${EC_FAKES_AS_NOISE:-0}" == "1" ]] || echo --use-gt-clusters ) \
       $NETWORK_OPTS
 
 RC=$?

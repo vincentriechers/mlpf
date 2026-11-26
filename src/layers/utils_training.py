@@ -43,12 +43,16 @@ class FreezeClustering(BaseFinetuning):
             "ScaledGooeyBatchNorm2_1", "gatr", "clustering", "beta",   # GATr
             "input_net", "encoder", "decoder",                         # Mask3D
         )
+        # EC_FAKES_AS_NOISE: stage 2 trains on the frozen model's own clusters, so the batch norms keep their stage-1
+        # weights and statistics (train_bn=False here, eval mode in on_train_batch_start)
+        own_clusters = os.environ.get("EC_FAKES_AS_NOISE") == "1"
         frozen = []
         for name in CLUSTERING_MODULES:
             mod = getattr(pl_module, name, None)
             if isinstance(mod, torch.nn.Module):
-                self.freeze(mod)
+                self.freeze(mod, train_bn=not own_clusters)
                 frozen.append(name)
+        self._frozen = frozen
         if not frozen:
             # Never let --freeze-clustering silently do nothing: a stage-2 run
             # that trains the clustering backbone alongside the EC heads is not
@@ -60,6 +64,12 @@ class FreezeClustering(BaseFinetuning):
                 "src/layers/utils_training.py:FreezeClustering."
             )
         print("CLUSTERING HAS BEEN FROZEN:", ", ".join(frozen))
+
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        # Lightning sets the whole module to train mode at every epoch start and after validation
+        if os.environ.get("EC_FAKES_AS_NOISE") == "1":
+            for name in self._frozen:
+                getattr(pl_module, name).eval()
 
     def finetune_function(self, pl_module, current_epoch, optimizer):
         print("Not finetunning")
@@ -245,6 +255,34 @@ def obtain_clustering_for_matched_showers(
             with open(os.environ.get("DUMP_NH_FATE_PATH", "/tmp/nh_fate.csv"), "a") as _f:
                 for _r in _rows:
                     _f.write(",".join(str(_x) for _x in _r) + "\n")
+        # EC_SHARE_TARGETS (with EC_FAKES_AS_NOISE, off by default): a trackless cluster's target is the true energy of the
+        # particles without a track that sits in its cells (each particle split by its cell energy), not the whole energy
+        # of one matched particle; a cluster holding less than EC_SHARE_NOISE_FRAC of its cell energy that way is noise
+        share_mode = (not use_gt_clusters and not add_fakes and os.environ.get("EC_FAKES_AS_NOISE") == "1"
+                      and os.environ.get("EC_SHARE_TARGETS") == "1")
+        if share_mode:
+            share_frac = float(os.environ.get("EC_SHARE_NOISE_FRAC", "0.1"))
+            sh_track = graphs[i].ndata["hit_type"].view(-1) == 1
+            sh_e = graphs[i].ndata["e_hits"].view(-1).float() * (~sh_track)
+            sh_pn = graphs[i].ndata["particle_number"].view(-1).long()
+            sh_E = dic["part_true"].E.view(-1).float().to(sh_e.device)
+            sh_m = dic["part_true"].m.view(-1).float().to(sh_e.device)
+            sh_pad = max(int(sh_pn.max()) - sh_E.shape[0], 0) if sh_pn.numel() else 0   # labels beyond the particle list
+            sh_E, sh_m = torch.nn.functional.pad(sh_E, (0, sh_pad)), torch.nn.functional.pad(sh_m, (0, sh_pad))
+            sh_dep = torch.zeros(sh_E.shape[0] + 1, device=sh_e.device).scatter_add_(0, sh_pn, sh_e)
+            sh_tracked = torch.zeros(sh_E.shape[0] + 1, dtype=torch.bool, device=sh_e.device)
+            sh_tracked[sh_pn[sh_track]] = True
+            sh_tracked[0] = True   # cells without a particle carry no target
+
+            def neutral_share(mask):
+                w = torch.zeros_like(sh_dep).scatter_add_(0, sh_pn[mask], sh_e[mask]) / sh_dep.clamp(min=1e-9)
+                w[sh_tracked] = 0.0
+                et = w[1:] * sh_E
+                return et.sum(), (w[1:] * sh_m).sum(), int(torch.argmax(et))
+
+            def cell_direction(mask):
+                c = (graphs[i].ndata["pos_hits_xyz"][mask] * sh_e[mask][:, None]).sum(0)
+                return (c / c.norm().clamp(min=1e-9)).detach().cpu().numpy()
         shower_p_unique = torch.unique(labels)
         shower_p_unique, row_ind, col_ind, i_m_w, _ = match_showers(
             labels, dic, particle_ids, model_output, local_rank, i, None
@@ -313,36 +351,27 @@ def obtain_clustering_for_matched_showers(
                 energy_t_corr_daughters = dic["part_true"].m.to(
                     model_output.device
                 )
-                true_energy_shower = energy_t[row_ind_[j]]
-                y_pids_matched.append(y.pid[row_ind_[j]].item())
-                y_coords_matched.append(y.coord[row_ind_[j]].detach().cpu().numpy())
-                energy_true_daughters.append(energy_t_corr_daughters[row_ind_[j]])
                 reco_energy_shower = torch.sum(graphs[i].ndata["e_hits"][mask])
+                if share_mode and not (mask & sh_track).any():
+                    e_sh, m_sh, dom = neutral_share(mask)
+                    if e_sh < share_frac * reco_energy_shower:   # cells of tracked particles or of none: nothing to add
+                        true_energy_shower = torch.zeros(1, device=model_output.device)
+                        energy_true_daughters.append(torch.zeros(1, device=model_output.device))
+                        y_pids_matched.append(NOISE_PID)
+                        y_coords_matched.append(cell_direction(mask))
+                    else:
+                        true_energy_shower = e_sh
+                        energy_true_daughters.append(m_sh.view(-1))
+                        y_pids_matched.append(y.pid[dom].item())
+                        y_coords_matched.append(y.coord[dom].detach().cpu().numpy())
+                else:
+                    true_energy_shower = energy_t[row_ind_[j]]
+                    y_pids_matched.append(y.pid[row_ind_[j]].item())
+                    y_coords_matched.append(y.coord[row_ind_[j]].detach().cpu().numpy())
+                    energy_true_daughters.append(energy_t_corr_daughters[row_ind_[j]])
                 graphs_showers_matched.append(g)
                 true_energy_showers.append(true_energy_shower.view(-1))
                 reco_energy_showers.append(reco_energy_shower.view(-1))
-        noise_link = float(os.environ.get("EC_NOISE_CLUSTERS", "0"))
-        if use_gt_clusters and noise_link > 0:
-            # noise-only clusters as pseudo-particles: true energy 0, PID NOISE_PID (no energy loss, PID class "noise")
-            for mask in noise_pseudo_clusters(graphs[i], labels, noise_link, float(os.environ.get("EC_NOISE_EMIN", "0"))):
-                g = dgl.graph(([], []))
-                g.add_nodes(int(mask.sum()))
-                g = g.to(model_output.device)
-                g.ndata["h"] = graphs[i].ndata["h"][mask]
-                if "pos_pxpypz" in graphs[i].ndata:
-                    g.ndata["pos_pxpypz"] = graphs[i].ndata["pos_pxpypz"][mask]
-                if "pos_pxpypz_at_vertex" in graphs[i].ndata:
-                    g.ndata["pos_pxpypz_at_vertex"] = graphs[i].ndata["pos_pxpypz_at_vertex"][mask]
-                g.ndata["chi_squared_tracks"] = graphs[i].ndata["chi_squared_tracks"][mask]
-                e_m = graphs[i].ndata["e_hits"].view(-1)[mask]
-                xyz = graphs[i].ndata["pos_hits_xyz"][mask]
-                c = (xyz * e_m[:, None]).sum(0) / e_m.sum().clamp(min=1e-9)
-                graphs_showers_matched.append(g)
-                true_energy_showers.append(torch.zeros(1, device=model_output.device))
-                reco_energy_showers.append(e_m.sum().view(-1))
-                energy_true_daughters.append(torch.zeros(1, device=model_output.device))
-                y_pids_matched.append(NOISE_PID)
-                y_coords_matched.append((c / c.norm().clamp(min=1e-9)).detach().cpu().numpy())
         pred_showers = shower_p_unique
         pred_showers[index_matches] = -1
         pred_showers[
@@ -352,6 +381,44 @@ def obtain_clustering_for_matched_showers(
         )
         mask_fakes = pred_showers != -1
         fakes_idx = torch.where(mask_fakes)[0]
+        noise_link = float(os.environ.get("EC_NOISE_CLUSTERS", "0"))
+        noise_masks = []
+        if use_gt_clusters and noise_link > 0:
+            # noise-only clusters as pseudo-particles: true energy 0, PID NOISE_PID (no energy loss, PID class "noise")
+            noise_masks = noise_pseudo_clusters(graphs[i], labels, noise_link, float(os.environ.get("EC_NOISE_EMIN", "0")))
+        elif not use_gt_clusters and not add_fakes and os.environ.get("EC_FAKES_AS_NOISE") == "1":
+            # stage 2 trained on the model's own clusters: trackless clusters without a matched particle (recorded
+            # noise, fragments of a shower whose particle owns another cluster) become the same pseudo-particles
+            is_track = graphs[i].ndata["hit_type"].view(-1) == 1
+            noise_masks = [m for m in (labels == j for j in fakes_idx) if not (m & is_track).any()]
+        for mask in noise_masks:
+            g = dgl.graph(([], []))
+            g.add_nodes(int(mask.sum()))
+            g = g.to(model_output.device)
+            g.ndata["h"] = graphs[i].ndata["h"][mask]
+            if "pos_pxpypz" in graphs[i].ndata:
+                g.ndata["pos_pxpypz"] = graphs[i].ndata["pos_pxpypz"][mask]
+            if "pos_pxpypz_at_vertex" in graphs[i].ndata:
+                g.ndata["pos_pxpypz_at_vertex"] = graphs[i].ndata["pos_pxpypz_at_vertex"][mask]
+            g.ndata["chi_squared_tracks"] = graphs[i].ndata["chi_squared_tracks"][mask]
+            e_m = graphs[i].ndata["e_hits"].view(-1)[mask]
+            xyz = graphs[i].ndata["pos_hits_xyz"][mask]
+            c = (xyz * e_m[:, None]).sum(0) / e_m.sum().clamp(min=1e-9)
+            graphs_showers_matched.append(g)
+            reco_energy_showers.append(e_m.sum().view(-1))
+            e_sh = None
+            if share_mode:
+                e_sh, m_sh, dom = neutral_share(mask)
+            if e_sh is not None and e_sh >= share_frac * e_m.sum():   # a piece of a trackless particle keeps its share
+                true_energy_showers.append(e_sh.view(-1))
+                energy_true_daughters.append(m_sh.view(-1))
+                y_pids_matched.append(y.pid[dom].item())
+                y_coords_matched.append(y.coord[dom].detach().cpu().numpy())
+            else:
+                true_energy_showers.append(torch.zeros(1, device=model_output.device))
+                energy_true_daughters.append(torch.zeros(1, device=model_output.device))
+                y_pids_matched.append(NOISE_PID)
+                y_coords_matched.append((c / c.norm().clamp(min=1e-9)).detach().cpu().numpy())
         if add_fakes:
             for j in fakes_idx:
                 mask = labels == j

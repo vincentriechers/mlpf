@@ -381,7 +381,7 @@ class EnergyCorrection():
             if not self.args.restrict_PID_charge:
                 pids_neutral += [4]
         self.pids_charged = pids_charged
-        if float(os.environ.get("EC_NOISE_CLUSTERS", "0")) > 0:
+        if float(os.environ.get("EC_NOISE_CLUSTERS", "0")) > 0 or os.environ.get("EC_FAKES_AS_NOISE") == "1":
             pids_neutral = pids_neutral + [5]  # 5 = noise-only cluster (pseudo-particle PID 0, noise_clusters.NOISE_PID)
         self.pids_neutral = pids_neutral
 

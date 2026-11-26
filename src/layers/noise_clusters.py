@@ -4,6 +4,10 @@ With --use-gt-clusters the energy and PID heads only ever see truth particles; c
 noise, or recorded noise overlaid on the simulation) never form a cluster, so at inference every trackless cluster becomes a
 photon or a neutral hadron. noise_pseudo_clusters groups those cells into connected clusters that utils_training appends as
 pseudo-particles (true energy 0, PID NOISE_PID); EnergyCorrection maps them to a neutral class 5 ("noise").
+EC_FAKES_AS_NOISE=1 (also off by default) trains stage 2 on the frozen model's own clusters instead (no --use-gt-clusters):
+every trackless cluster without a matched particle becomes such a pseudo-particle.
+With EC_SHARE_TARGETS=1 on top, a trackless cluster's energy target is the true energy of the particles without a track that
+sits in its cells; it becomes a pseudo-particle only if that is below EC_SHARE_NOISE_FRAC (0.1) of its cell energy.
 """
 import numpy as np
 import torch
